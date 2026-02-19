@@ -1,139 +1,172 @@
-from agents.agent_monte_carlo import MCAgent as Agent
-from agents.probabilistic_brain import ProbabilisticBrain
+import numpy as np
+
+from agents.unified_brain import UnifiedBrain
+from agents.unified_executor import UnifiedExecutor
 from data.data_manager import update_master_data
 
 
-def run_stochastic_epoch(agents, df, steps_per_agent=2000):
-    """
-    Each agent teleports to a random spot, takes a fixed number of actions,
-    and teleports again if a trade completes.
-    """
-    for agent in agents:
-        # 1. Start each agent at a fresh, random location in the data
-        # Ensure there is enough room for the history lookback
-        agent.reset_and_teleport(df)
+# -------------------------------------------------------
+# Utility: Simple Position Manager
+# -------------------------------------------------------
+class PositionManager:
+    def __init__(self, commission=0.0002):
+        self.position = None
+        self.entry = 0.0
+        self.commission = commission
 
-        for _ in range(steps_per_agent):
-            # 2. Extract the current row based on the agent's internal index
-            row = df.iloc[agent.current_index]
+    def step(self, action, price):
+        """
+        Executes action and returns reward if trade closes.
+        """
+        reward = 0.0
 
-            # 3. Decision & Action
-            state, action = agent.act(row)
+        # BUY
+        if action == 0 and self.position is None:
+            self.position = "LONG"
+            self.entry = price * (1 + self.commission)
 
-            # 4. Handle Reward (In MCAgent, this stores memory and learns on SELL)
-            # Use 'Close' or whatever your price column is named
-            reward = agent.handle_reward(state, action, row['Close'])
+        # SELL
+        elif action == 1 and self.position == "LONG":
+            exit_price = price * (1 - self.commission)
+            reward = (exit_price - self.entry) / self.entry
+            self.position = None
+            self.entry = 0.0
 
-            # 5. Teleport Logic (The Stochastic Part)
-            # If the agent just SOLD (action 1), it 'finishes' that scenario.
-            # We jump it to a new random index to see a different market condition.
-            if action == 1 and reward != 0:
-                agent.reset_and_teleport(df)
-            else:
-                # Otherwise, move the index forward by the agent's pace
-                agent.current_index += agent.pace
+        # HOLD = 2 → do nothing
+        return reward
 
-            # 6. Safety Guard: If we hit the end of the data, teleport back
-            if agent.current_index >= len(df) - 1:
-                agent.reset_and_teleport(df)
+    def reset(self):
+        self.position = None
+        self.entry = 0.0
 
 
+# -------------------------------------------------------
+# Training Loop
+# -------------------------------------------------------
+def run_stochastic_epoch(
+        executor: UnifiedExecutor,
+        indicators: np.ndarray,
+        prices: np.ndarray,
+        steps=2000,
+        train=True
+):
+    data_len = len(prices)
+    max_steps = min(steps, data_len - 200)
+    if max_steps <= 0:
+        return 0.0
+
+    pos_mgr = PositionManager()
+    start = np.random.randint(50, data_len - max_steps)
+
+    memory = []
+    total_reward = 0.0
+
+    for i in range(max_steps):
+        idx = start + i
+
+        # 1. Delegate state aggregation to the Executor
+        state = executor.get_state(indicators[idx])
+
+        # 2. Brain chooses action
+        action = executor.brain.act(state)
+
+        # 3. Environment step
+        reward = pos_mgr.step(action, prices[idx])
+        total_reward += reward
+
+        if train:
+            memory.append((state, action, reward))
+
+        # 4. Episode reset
+        if reward != 0.0:
+            pos_mgr.reset()
+
+    # --------------------------------
+    # Batch Learning Phase
+    # --------------------------------
+    if train and memory:
+        states, actions, rewards = zip(*memory)
+        executor.brain.learn(states, actions, rewards)
+
+    return total_reward
+
+
+# -------------------------------------------------------
+# Main Simulation
+# -------------------------------------------------------
 def run_sim():
+    # --------------------------------
+    # Load Data
+    # --------------------------------
+    print("Loading master data...")
     df = update_master_data()
-
-    # --- 1. Intelligence ---
-    brain = ProbabilisticBrain(alpha=0.001)
-
-    agents = [
-        Agent("Scalper_15m", pace=1, brain=brain),
-        Agent("Scalper_30m", pace=2, brain=brain),
-        Agent("Swing_1h", pace=4, brain=brain),
-        Agent("Swing_2h", pace=8, brain=brain),
-        Agent("Trend_4h", pace=16, brain=brain)
+    features = [
+        "RSI_Scaled",
+        "MACD_Scaled",
+        "BB_Scaled",
+        "OBV_Scaled"
     ]
+    indicators = df[features].values.astype(np.float32)
+    prices = df["Close"].values.astype(np.float32)
 
-    # Split data: 80% for training, 20% for evaluation
-    split_idx = int(len(df) * 0.8)
-    train_df = df.iloc[:split_idx]
-    eval_df = df.iloc[split_idx:]
+    # --------------------------------
+    # Train / Val Split
+    # --------------------------------
+    split = int(len(indicators) * 0.8)
 
-    # --- Training with Patient Early Stopping ---
-    best_score = -float('inf')
-    patience_counter = 0
-    max_patience = 10  # Increased from 5 to 10 to allow for 'recovery'
-    min_profit_threshold = 0.01  # Don't stop early until we hit at least +1% profit
+    train_X, train_P = indicators[:split], prices[:split]
+    val_X, val_P = indicators[split:], prices[split:]
 
-    for epoch in range(200):
-        run_stochastic_epoch(agents, train_df, steps_per_agent=2000)
-        current_score = brain.evaluate_strategy(eval_df)
+    # --------------------------------
+    # Initialize Unified Architecture
+    # --------------------------------
+    paces = (1, 2, 4, 8, 16)
 
-        print(f"Epoch {epoch + 1} | Eval P/L: {current_score:.2%}")
+    # StateAggregator outputs 4 features per pace.
+    # Therefore, input_size = len(paces) * 8 features
+    input_size = len(paces) * 8
 
-        # Logic: If it's the best so far, SAVE.
-        if current_score > best_score:
-            best_score = current_score
-            patience_counter = 0
+    brain = UnifiedBrain(input_size=input_size, lr=3e-4)
+    brain.load()  # Load previous weights if they exist
+
+    executor = UnifiedExecutor(name="MainExecutor", brain=brain, paces=paces)
+
+    # --------------------------------
+    # Early Stopping
+    # --------------------------------
+    best_val = -np.inf
+    patience = 10
+    bad_epochs = 0
+    epoch = 1
+
+    # --------------------------------
+    # Training Loop
+    # --------------------------------
+    print("Starting simulation...")
+    while True:
+        train_pl = run_stochastic_epoch(
+            executor, train_X, train_P, steps=3000, train=True
+        )
+        val_pl = run_stochastic_epoch(
+            executor, val_X, val_P, steps=800, train=False
+        )
+
+        # --------------------------------
+        # Model Selection
+        # --------------------------------
+        if val_pl > best_val:
+            best_val = val_pl
+            bad_epochs = 0
             brain.save()
-            print(f"New Best Model! ({current_score:.2%})")
+            print(f"✔ Epoch {epoch} | Saved | Val P/L: {best_val:.3%} | Train P/L: {train_pl:.3%}")
         else:
-            # Patience only kicks in if we are already in 'Profit'
-            # Or if we've been failing for a very long time
-            if current_score > 0 or patience_counter > 15:
-                patience_counter += 1
-            else:
-                # If we are still losing, keep training!
-                # We don't want to stop while the brain is still 'negative'
-                patience_counter = 0
+            bad_epochs += 1
+            print(f"✖ Epoch {epoch} | No Impr | Val P/L: {val_pl:.3%} | Train P/L: {train_pl:.3%}")
 
-        if patience_counter >= max_patience and best_score > min_profit_threshold:
-            print(f"\n>>> TARGET REACHED & STABILIZED. Stopping.")
+        if bad_epochs >= patience:
+            print("Early stopping reached.")
             break
-
-    # --- 3. Sequential Validation (The Final Exam) ---
-    # We still run one sequential pass at the end to see how it performs on the full timeline.
-    print("\n>>> TRAINING COMPLETE. Running Sequential Validation...")
-    # ... (Keep your existing validation logic here, but use iloc for speed) ...
-
-    brain.save()
-    print("Simulation Complete.")
-
-    for agent in agents:
-        agent.total_reward = 0.0
-        agent.inventory = []
-        agent.previous_unrealized_profit = 0.0
-
-    close_prices = df['Close'].values
-    # Pre-calculate the states for the whole DF or convert to list of dicts
-    rows = df.to_dict('records')
-
-    print("\n>>> Running Efficient Sequential Validation...")
-
-    # 2. Iterate by index only
-    for idx in range(len(rows)):
-        current_row = rows[idx]
-        current_close = close_prices[idx]
-
-        for agent in agents:
-            # Check if it's time for this agent to act based on its pace
-            if idx % agent.pace == 0:
-                state, action = agent.act(current_row)
-                # In validation, we just want the reward/stats, no weights updates usually
-                agent.handle_reward(state, action, current_close)
-
-    # --- 6. Final Report & Persistence ---
-
-    total_pl = sum(a.total_reward for a in agents)
-    print("\n" + "=" * 34)
-    print("       FINAL PERFORMANCE       ")
-    print("=" * 34)
-    for a in agents:
-        color = "+" if a.total_reward > 0 else ""
-        print(f"{a.name:12} | P/L: {color}{a.total_reward:>7.2%}")
-    print("-" * 34)
-    print(f"Group Combined Return: {total_pl:.2%}")
-    print("Weights & History saved to outcomes/prob_weights.pkl")
-    print("=" * 34)
-    print("\nRun 'python diagnostic.py' to see the visual brain analysis.")
+        epoch += 1
 
 
 if __name__ == "__main__":
