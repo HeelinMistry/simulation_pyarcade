@@ -1,7 +1,7 @@
 import os
 import glob
 import pandas as pd
-from preprocessing import preprocess_binance_data, preprocess_indicators_data
+from preprocessing import preprocess_binance_data, preprocess_indicators
 
 # --- 1. Configuration ---
 RAW_DIR = "data/raw"
@@ -50,11 +50,9 @@ def update_master_data():
     full_df = pd.concat(all_dfs).drop_duplicates(subset=['Open_time']).sort_values('Open_time')
     full_df.reset_index(drop=True, inplace=True)
 
-    # We save to a temp file because your preprocess_indicators_data likely expects a path
-    full_df.to_csv(MASTER_CSV, index=False)
-
     print("Recalculating indicators across the full dataset timeline...")
-    # This ensures RSI/MACD flow perfectly from Dec into Jan
-    preprocess_indicators_data(MASTER_CSV, MASTER_CSV)
+    # We save to a temp file because your preprocess_indicators_data likely expects a path
+    full_df = preprocess_indicators(full_df)
+    full_df.to_csv(MASTER_CSV, index=False)
 
     return pd.read_csv(MASTER_CSV)

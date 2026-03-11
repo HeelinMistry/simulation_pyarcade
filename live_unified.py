@@ -6,7 +6,7 @@ import numpy as np
 from agents.unified_brain import UnifiedBrain
 from agents.unified_executor import UnifiedExecutor
 from simulation.environment import SimulationEnv
-from preprocessing import process_live_indicators
+from preprocessing import preprocess_indicators
 
 BINANCE_API_URL = "https://api.binance.com/api/"
 
@@ -53,22 +53,24 @@ def run_live_sim(symbol="XRP"):
     raw = get_live_candles(symbol)
     if raw is None: return
 
-    # 2. Preprocessing (Indicators & Scaling)
-    df = process_live_indicators(raw)
+    # 2. Preprocessing
+    df = preprocess_indicators(raw)
     df.dropna(inplace=True)
     df.reset_index(drop=True, inplace=True)
 
-    # 3. Brain Setup
-    # Configuration matches the architecture: 5 paces * 8 features (4 raw + 4 slopes)
-    paces = (1, 2, 4, 8, 16)
-    input_size = len(paces) * 8
+    # 3. Brain Setup (The critical fix)
+    paces = (1, 2, 3, 4, 5)
+    # New Math: (5 agents * 12 features) + 2 portfolio features
+    input_size = (len(paces) * 12) + 2
 
+    # Explicitly pass the input_size to ensure the weight matrices align
     brain = UnifiedBrain(input_size=input_size)
-    brain.load()  # Loads from outcomes/unified_brain.pkl
+
+    # This will now pass the 'Shape Check' we added to UnifiedBrain.load()
+    brain.load()
     print(f"🧠 UnifiedBrain initialized (Input Size: {input_size})")
 
     # 4. Unified Executor
-    # This now handles the Aggregator and MultiPaceAgents internally
     executor = UnifiedExecutor(
         name=f"Live_{symbol}",
         brain=brain,
@@ -76,7 +78,8 @@ def run_live_sim(symbol="XRP"):
     )
 
     # 5. Launch Simulation Window
-    # The Environment will call executor.step() on every frame
+    # Ensure your SimulationEnv class in simulation/environment.py
+    # passes (indicators, price, tick) to executor.step()
     print(f"🚀 Launching UI for {symbol}...")
     window = SimulationEnv(
         data_df=df,

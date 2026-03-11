@@ -33,6 +33,7 @@ class SimulationEnv(arcade.Window):
         row = self.df.iloc[idx]
         next_row = self.df.iloc[idx + 1]
 
+        # --- 1. Draw Price Line ---
         if self.show_chart:
             line = create_line(
                 start_x=self.get_chart_x(idx),
@@ -44,6 +45,8 @@ class SimulationEnv(arcade.Window):
             )
             self.chart_shapes.append(line)
 
+        # --- 2. Feature Preparation ---
+        # NOTE: See the warning below regarding this array size!
         indicators = np.array([
             row["RSI_Scaled"],
             row["MACD_Scaled"],
@@ -51,21 +54,32 @@ class SimulationEnv(arcade.Window):
             row["OBV_Scaled"]
         ], dtype=np.float32)
 
+        # --- 3. Execute Brain Step ---
         action, probs = self.executor.step(
             indicators=indicators,
             price=row["Close"],
             tick=idx
         )
 
-        if action in (0, 1):
-            color = arcade.color.GREEN if action == 0 else arcade.color.RED
-            symbol = "▲" if action == 0 else "▼"
+        # --- 4. Draw Signals [0:LONG, 1:SHORT, 2:CLOSE] ---
+        if action in (0, 1, 2):
+            if action == 0:
+                color = arcade.color.GREEN
+                symbol = "▲"
+            elif action == 1:
+                color = arcade.color.RED
+                symbol = "▼"
+            else:  # action == 2 (CLOSE)
+                color = arcade.color.ORANGE
+                symbol = "✘"  # Clear 'Exit' marker
+
             sig = arcade.Text(
                 text=symbol,
                 x=self.get_chart_x(idx),
                 y=self.get_chart_y(row["Close"]),
                 color=color,
                 font_size=10,
+                bold=True,
                 anchor_x="center",
                 anchor_y="center"
             )
@@ -78,8 +92,13 @@ class SimulationEnv(arcade.Window):
         if probs is None:
             return
 
-        labels = ["BUY", "SELL", "HOLD"]
-        colors = [arcade.color.APPLE_GREEN, arcade.color.BITTERSWEET, arcade.color.DIM_GRAY]
+        labels = ["LONG", "SHORT", "CLOSE", "HOLD"]
+        colors = [
+            arcade.color.GREEN,  # 0: LONG
+            arcade.color.RED,  # 1: SHORT
+            arcade.color.ORANGE,  # 2: CLOSE
+            arcade.color.GRAY  # 3: HOLD
+        ]
 
         for i, p in enumerate(probs):
             width = max(1, p * 200)
@@ -119,6 +138,24 @@ class SimulationEnv(arcade.Window):
         )
 
         self.draw_probability_bars()
+
+    def _add_signal_marker(self, tick, price, text, color):
+        # Convert market price/tick to screen coordinates
+        screen_x = self.get_x_for_tick(tick)
+        screen_y = self.get_y_for_price(price)
+
+        # Create an Arcade Text object (Faster than draw_text)
+        label = arcade.Text(
+            text,
+            screen_x,
+            screen_y,
+            color,
+            12,
+            bold=True,
+            anchor_x="center",
+            anchor_y="center"
+        )
+        self.signal_labels.append(label)
 
     def on_close(self):
         print("Closing window.")
