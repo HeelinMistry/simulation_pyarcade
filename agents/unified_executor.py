@@ -1,20 +1,22 @@
 import numpy as np
+import cupy as cp
 from agents.state_aggregator import StateAggregator
 
 
 class UnifiedExecutor:
-    def __init__(self, name, brain, paces=(1, 2, 4, 8, 16), max_trade_len=100):
+    def __init__(self, name, planner, paces=(1, 2, 4, 8, 16)):
         self.name = name
-        self.brain = brain
+        # 1. We replace 'brain' with 'planner'
+        self.planner = planner
         self.aggregator = StateAggregator(paces)
-        self.inventory = []  # Still used to store entry price
-        self.current_side = None  # Tracks "LONG" or "SHORT"
+        self.inventory = []
+        self.current_side = None
         self.total_reward = 0.0
-        # Updated for 4 actions: [LONG=0, SHORT=1, CLOSE=2, HOLD=3]
         self.last_probs = np.array([0.0, 0.0, 0.0, 1.0])
+        self.tick = 0
 
-    def _calculate_internal_state(self, current_price, current_tick):
-        """Calculates 3 vital metrics: Side, uPnL, and Duration."""
+    def _calculate_internal_state(self, current_price):
+        """Calculates 2 vital metrics: Side and uPnL."""
         if len(self.inventory) > 0:
             entry_price = self.inventory[0]
 
@@ -27,17 +29,32 @@ class UnifiedExecutor:
 
             u_pnl = np.clip(u_pnl, -0.05, 0.05)
         else:
-            side_val, u_pnl, duration = 0.0, 0.0, 0.0
+            side_val, u_pnl = 0.0, 0.0
 
         return {
             'position': side_val,
             'unrealized_pnl': u_pnl
         }
 
+    def get_state(self, indicator_input, current_price):
+        # Update market indicators
+        self.aggregator.update(indicator_input)
+
+        # Get internal context
+        portfolio_info = self._calculate_internal_state(current_price)
+
+        # Pass both to the aggregator to get the raw 63-feature array
+        return self.aggregator.get_state(portfolio_info)
+
     def step(self, indicators: np.ndarray, price: float, tick: int):
-        state = self.get_state(indicators, price, tick)
-        self.last_probs = self.brain.get_probs(state)
-        action = self.brain.act_deterministic(state)
+        self.tick = tick
+
+        # 1. Extract the raw multi-pace features
+        raw_features = self.get_state(indicators, price)
+
+        # 2. THE SEARCH: Ask the MCTS Planner to simulate futures and pick the best action
+        action, probs = self.planner.search_best_action(raw_features)
+        self.last_probs = probs
 
         trade_reward = 0.0
 
@@ -73,7 +90,6 @@ class UnifiedExecutor:
             reward = (entry - price) / entry
 
         self.current_side = None
-        self.entry_tick = 0
         return reward
 
     def get_status(self):
@@ -82,12 +98,36 @@ class UnifiedExecutor:
             "pnl": self.total_reward
         }
 
-    def get_state(self, indicator_input, current_price, current_tick):
-        # Update market indicators
-        self.aggregator.update(indicator_input)
+    def predict_trajectory(self, indicators, price, horizon=15):
+        """
+        Generates an aggregate projection line using the World Model's
+        internal representation of the market state.
+        """
+        raw_features = self.get_state(indicators, price)
 
-        # Get internal context
-        portfolio_info = self._calculate_internal_state(current_price, current_tick)
+        # 1. Use the World Model to encode the state and predict probabilities
+        root_state = self.planner.model.get_initial_state(raw_features)
+        probs, _ = self.planner.model.predict(root_state)
+        probs = cp.asnumpy(probs)[0]
 
-        # Pass both to the aggregator (matches the new StateAggregator logic)
-        return self.aggregator.get_state(portfolio_info)
+        # Calculate Directional Bias: (P_Long - P_Short)
+        bias = probs[0] - probs[1]
+
+        # Extract Slopes from all agents in the aggregator
+        all_slopes = []
+        for agent in self.aggregator.agents:
+            agent_state = agent.get_state()
+            if len(agent_state) >= 8:
+                all_slopes.append(np.mean(agent_state[4:8]))
+
+        avg_momentum = np.mean(all_slopes) if all_slopes else 0
+
+        # Generate the Aggregate Line (The Consensus Path)
+        path = []
+        current_sim_price = price
+        for t in range(1, horizon + 1):
+            change = (bias * avg_momentum) * (t * 0.001)
+            current_sim_price += change
+            path.append(current_sim_price)
+
+        return np.array(path), bias

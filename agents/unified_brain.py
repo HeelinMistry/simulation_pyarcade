@@ -48,7 +48,7 @@ class UnifiedBrain:
         # Sort to find the difference between the top two choices
         second = np.partition(p, -2)[-2]
         if p[best] - second < min_conf:
-            return 2  # Action 2 is HOLD
+            return 3  # Action 3 is HOLD
         return best
 
     def learn_from_memory(self):

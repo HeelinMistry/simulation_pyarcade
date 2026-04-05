@@ -2,8 +2,10 @@ import arcade
 import pandas as pd
 import requests
 import numpy as np
+import cupy as cp
 
-from agents.unified_brain import UnifiedBrain
+from agents.MCTSPlanner import MCTSPlanner
+from agents.UnifiedWorldModel import UnifiedWorldModel
 from agents.unified_executor import UnifiedExecutor
 from simulation.environment import SimulationEnv
 from preprocessing import preprocess_indicators
@@ -11,19 +13,11 @@ from preprocessing import preprocess_indicators
 BINANCE_API_URL = "https://api.binance.com/api/"
 
 
-# -------------------------------------------------------
-# Binance Fetch
-# -------------------------------------------------------
 def get_live_candles(symbol="XRP"):
     """Fetches the latest 1000 candles from Binance."""
     interval = "15m"
     limit = 1000
-    url = (
-        f"{BINANCE_API_URL}v3/klines"
-        f"?symbol={symbol}USDT"
-        f"&interval={interval}"
-        f"&limit={limit}"
-    )
+    url = f"{BINANCE_API_URL}v3/klines?symbol={symbol}USDT&interval={interval}&limit={limit}"
     try:
         r = requests.get(url, timeout=10)
         r.raise_for_status()
@@ -44,9 +38,6 @@ def get_live_candles(symbol="XRP"):
     return df
 
 
-# -------------------------------------------------------
-# Live / Replay Runner
-# -------------------------------------------------------
 def run_live_sim(symbol="XRP"):
     # 1. Data Acquisition
     print(f"📡 Fetching live {symbol}/USDT data...")
@@ -58,38 +49,39 @@ def run_live_sim(symbol="XRP"):
     df.dropna(inplace=True)
     df.reset_index(drop=True, inplace=True)
 
-    # 3. Brain Setup (The critical fix)
-    paces = (1, 2, 3, 4, 5)
-    # New Math: (5 agents * 12 features) + 2 portfolio features
+    # 3. World Model Setup
+    paces = (1, 2, 4, 8, 12)
+    # Math: (5 agents * 12 features) + 2 portfolio features = 62
     input_size = (len(paces) * 12) + 2
 
-    # Explicitly pass the input_size to ensure the weight matrices align
-    brain = UnifiedBrain(input_size=input_size)
+    # Initialize World Model instead of UnifiedBrain
+    model = UnifiedWorldModel(input_size=input_size)
 
-    # This will now pass the 'Shape Check' we added to UnifiedBrain.load()
-    brain.load()
-    print(f"🧠 UnifiedBrain initialized (Input Size: {input_size})")
+    # Load the triple-network weights (Representation, Dynamics, Prediction)
+    model.load("outcomes/best_world_model.pkl")
+    print(f"🧠 Unified World Model loaded (Input Size: {input_size})")
 
-    # 4. Unified Executor
+    planner = MCTSPlanner(model, lookahead_depth=2)
+
+
+    # 4. Unified Executor (Now powered by MCTS Planner)
     executor = UnifiedExecutor(
-        name=f"Live_{symbol}",
-        brain=brain,
+        name=f"Live_WM_{symbol}",
+        planner=planner,
         paces=paces
     )
 
     # 5. Launch Simulation Window
-    # Ensure your SimulationEnv class in simulation/environment.py
-    # passes (indicators, price, tick) to executor.step()
-    print(f"🚀 Launching UI for {symbol}...")
+    print(f"🚀 Launching World Model UI for {symbol}...")
+    # The UI will call executor.step(), which triggers MCTS lookahead
     window = SimulationEnv(
         data_df=df,
         executor=executor,
         show_chart=True,
-        title=f"Live Replay: {symbol}USDT"
+        title=f"World Model Replay: {symbol}USDT"
     )
 
     arcade.run()
-    return brain
 
 
 if __name__ == "__main__":
