@@ -19,7 +19,7 @@ class MCTSPlanner:
 
         # 3. Branching: Simulate the outcome of each possible action
         for action_idx in range(4):
-            # Convert discrete action to a continuous signal (-1.0 to 1.0)
+            # Convert discrete action to a continuous signal
             action_signal = self._action_to_signal(action_idx)
 
             # Hallucinate the next market state and immediate reward
@@ -38,9 +38,14 @@ class MCTSPlanner:
         return best_action, cp.asnumpy(base_probs)[0]
 
     def _action_to_signal(self, action_idx):
-        """Translates discrete choices into signals the Dynamics net understands."""
-        mapping = {0: 1.0,  # LONG  -> Positive momentum expected
-                   1: -1.0,  # SHORT -> Negative momentum expected
-                   2: 0.0,  # CLOSE -> Neutral
-                   3: 0.0}  # HOLD  -> Neutral
+        """
+        Translates discrete choices into signals the Dynamics net understands.
+        Each action MUST have a unique mathematical signature.
+        """
+        mapping = {
+            0: 1.0,   # LONG
+            1: -1.0,  # SHORT
+            2: 0.5,   # CLOSE (Exit Intent)
+            3: 0.0    # HOLD (Patience/Maintenance Intent)
+        }
         return mapping[action_idx]

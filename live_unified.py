@@ -59,6 +59,7 @@ def run_live_sim(symbol="XRP"):
 
     # Load the triple-network weights (Representation, Dynamics, Prediction)
     model.load("outcomes/best_world_model.pkl")
+    model.lr = 1e-5  # Force stability here
     print(f"🧠 Unified World Model loaded (Input Size: {input_size})")
 
     planner = MCTSPlanner(model, lookahead_depth=2)

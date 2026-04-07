@@ -2,7 +2,7 @@ import numpy as np
 import os
 
 from agents.UnifiedWorldModel import UnifiedWorldModel
-from agents.MCTSPlanner import MCTSPlanner  # The new lookahead engine
+from agents.MCTSPlanner import MCTSPlanner
 from agents.unified_executor import UnifiedExecutor
 from data.data_manager import update_master_data
 
@@ -11,7 +11,7 @@ from data.data_manager import update_master_data
 # Utility: Simple Position Manager
 # -------------------------------------------------------
 class PositionManager:
-    def __init__(self, commission=0.00015):  # Added synthetic friction
+    def __init__(self, commission=0.00015):
         self.position = None
         self.entry = 0.0
         self.commission = commission
@@ -26,8 +26,10 @@ class PositionManager:
             reward = self._close_current(price)
             self.position = "SHORT"
             self.entry = price * (1 - self.commission)
-        elif action == 2 and self.position is not None:
+        elif action == 2:
             reward = self._close_current(price)
+        elif action == 3:
+            pass
         return reward
 
     def _close_current(self, price):
@@ -53,15 +55,11 @@ class PositionManager:
 def shape_reward(pnl, side, prediction_corr=0):
     multiplier = 120 if side == "SHORT" else 100
     reward = pnl * multiplier
-
     if pnl < 0:
         penalty_scale = 1.8 if side == "SHORT" else 1.5
         reward *= penalty_scale
-
-    # World Model Bonus: Did the hallucination match reality?
     if prediction_corr > 0.7:
         reward += 0.05
-
     return reward
 
 
@@ -70,44 +68,32 @@ def run_stochastic_epoch(executor, indicators, prices, num_trades=15, train=True
     total_reward = 0.0
     trades_completed = 0
     pos_mgr = PositionManager()
-
     WALK_DURATION = 2000
     correlation_scores = []
 
     while trades_completed < num_trades:
         start_idx = np.random.randint(200, data_len - WALK_DURATION)
         executor.aggregator.warm_up_all(indicators, start_idx)
-
         active_trade_sequence = []
 
         for i in range(WALK_DURATION):
             idx = start_idx + i
 
-            # Deep Analysis Projection
             if i % 50 == 0 and (idx + 15) < len(prices):
                 proj_path, bias = executor.predict_trajectory(indicators[idx], prices[idx], horizon=15)
                 real_path = prices[idx + 1:idx + 16]
-
                 if np.std(proj_path) > 1e-9 and np.std(real_path) > 1e-9:
                     corr = np.corrcoef(proj_path, real_path)[0, 1]
                     correlation_scores.append(corr)
 
-            # 1. Get current raw features
             current_raw_features = executor.get_state(indicators[idx], prices[idx])
-
-            # 2. Planning: MCTS simulates futures and returns action + expected policy
-            if train:
-                action, mcts_probs = executor.planner.search_best_action(current_raw_features)
-            else:
-                # Deterministic fallback for validation
-                action, mcts_probs = executor.planner.search_best_action(current_raw_features)
+            action, mcts_probs = executor.planner.search_best_action(current_raw_features)
+            
+            if not train:
                 action = int(np.argmax(mcts_probs))
-                if mcts_probs[action] < 0.35: action = 3  # Force HOLD on low conviction
+                if mcts_probs[action] < 0.35: action = 3
 
-            # 3. Environment Step
             pnl = pos_mgr.step(action, prices[idx])
-
-            # 4. Get the *Actual* Next State to train the Dynamics Network
             next_idx = min(idx + 1, data_len - 1)
             next_raw_features = executor.get_state(indicators[next_idx], prices[next_idx])
 
@@ -116,7 +102,6 @@ def run_stochastic_epoch(executor, indicators, prices, num_trades=15, train=True
             elif pnl != 0.0:
                 executor.inventory = []
 
-            # STORE SEARCH STATISTICS instead of just (state, action)
             if train:
                 active_trade_sequence.append({
                     'state': current_raw_features,
@@ -127,12 +112,8 @@ def run_stochastic_epoch(executor, indicators, prices, num_trades=15, train=True
 
             if pnl != 0.0:
                 shaped_reward = shape_reward(pnl, pos_mgr.position)
-
-                # Record the full sequence to the World Model
                 if train:
                     for step_data in active_trade_sequence:
-                        # We train the Dynamics net to predict the 'next_state' and 'shaped_reward'
-                        # We train the Prediction net to output the 'mcts_probs' and 'shaped_reward'
                         executor.planner.model.record(
                             s=step_data['state'],
                             a=step_data['action'],
@@ -146,19 +127,13 @@ def run_stochastic_epoch(executor, indicators, prices, num_trades=15, train=True
                 trades_completed += 1
                 active_trade_sequence = []
                 pos_mgr.reset()
-
-            if trades_completed >= num_trades:
-                break
+            if trades_completed >= num_trades: break
 
     avg_corr = np.mean(correlation_scores) if correlation_scores else 0
     return total_reward, avg_corr
 
 
-# -------------------------------------------------------
-# Main Simulation
-# -------------------------------------------------------
 def run_sim():
-    print("Loading master data...")
     df = update_master_data()
     features = ["RSI_Scaled", "MACD_Scaled", "BB_Scaled", "OBV_Scaled"]
     indicators = df[features].values.astype(np.float32)
@@ -170,15 +145,13 @@ def run_sim():
 
     paces = (1, 2, 4, 8, 12)
     input_size = (len(paces) * 12) + 2
-
-    # --- NEW WORLD MODEL INITIALIZATION ---
     world_model = UnifiedWorldModel(input_size=input_size, hidden_size=128)
 
-    # Load weights if they exist (requires updated save/load logic in WorldModel)
+    # Load weights AND LR if they exist
     if os.path.exists("outcomes/best_world_model.pkl"):
         world_model.load("outcomes/best_world_model.pkl")
 
-    planner = MCTSPlanner(world_model, lookahead_depth=20)
+    planner = MCTSPlanner(world_model, lookahead_depth=200)
     executor = UnifiedExecutor(name="MainExecutor", planner=planner, paces=paces)
 
     best_val = -np.inf
@@ -187,13 +160,12 @@ def run_sim():
     epoch = 1
     val_history = []
 
-    print("🚀 Starting World Model Training...")
+    print(f"🚀 World Model initialized at LR: {world_model.lr:.2e}")
 
     while True:
         train_pnl, avg_corr = run_stochastic_epoch(
             executor, train_X, train_P, num_trades=200, train=True
         )
-
         val_pnl, avg_corr = run_stochastic_epoch(
             executor, val_X, val_P, num_trades=200, train=False
         )
@@ -210,7 +182,8 @@ def run_sim():
         else:
             bad_epochs += 1
 
-        world_model.lr = max(1e-5, world_model.lr * 0.98)
+        # PERMANENT LR DECAY: This now updates the internal value which is saved
+        world_model.lr = max(1e-6, world_model.lr * 0.98)
 
         print(
             f"Epoch {epoch:03d} | LR: {world_model.lr:.2e} | Val P/L: {val_pnl:+.2%} (Smooth: {smoothed_val:+.2%}) (Corr: {avg_corr:+.2%})")
@@ -218,9 +191,7 @@ def run_sim():
         if bad_epochs >= patience:
             print(f"🛑 Early stopping reached. Best Smoothed Val: {best_val:.4f}")
             break
-
         epoch += 1
-
 
 if __name__ == "__main__":
     run_sim()

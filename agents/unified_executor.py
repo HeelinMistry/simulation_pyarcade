@@ -4,9 +4,8 @@ from agents.state_aggregator import StateAggregator
 
 
 class UnifiedExecutor:
-    def __init__(self, name, planner, paces=(1, 2, 4, 8, 16)):
+    def __init__(self, name, planner, paces=(1, 2, 4, 8, 12)):
         self.name = name
-        # 1. We replace 'brain' with 'planner'
         self.planner = planner
         self.aggregator = StateAggregator(paces)
         self.inventory = []
@@ -16,8 +15,8 @@ class UnifiedExecutor:
         self.tick = 0
 
     def _calculate_internal_state(self, current_price):
-        """Calculates 2 vital metrics: Side and uPnL."""
-        if len(self.inventory) > 0:
+        """Calculates position and unrealized P/L."""
+        if self.current_side is not None and len(self.inventory) > 0:
             entry_price = self.inventory[0]
 
             if self.current_side == "LONG":
@@ -37,50 +36,52 @@ class UnifiedExecutor:
         }
 
     def get_state(self, indicator_input, current_price):
-        # Update market indicators
         self.aggregator.update(indicator_input)
-
-        # Get internal context
         portfolio_info = self._calculate_internal_state(current_price)
-
-        # Pass both to the aggregator to get the raw 63-feature array
         return self.aggregator.get_state(portfolio_info)
 
     def step(self, indicators: np.ndarray, price: float, tick: int):
         self.tick = tick
-
-        # 1. Extract the raw multi-pace features
         raw_features = self.get_state(indicators, price)
 
-        # 2. THE SEARCH: Ask the MCTS Planner to simulate futures and pick the best action
+        # THE SEARCH: Use the MCTS Planner
         action, probs = self.planner.search_best_action(raw_features)
         self.last_probs = probs
 
         trade_reward = 0.0
 
-        # Action 0: Go LONG (closes Short if exists)
+        # Action 0: LONG, 1: SHORT, 2: CLOSE, 3: HOLD
         if action == 0 and self.current_side != "LONG":
-            trade_reward = self._close_position(price)
+            # If we were SHORT, close it first
+            if self.current_side == "SHORT":
+                trade_reward = self._close_position(price)
+            
             self.inventory = [price]
             self.current_side = "LONG"
 
-        # Action 1: Go SHORT (closes Long if exists)
         elif action == 1 and self.current_side != "SHORT":
-            trade_reward = self._close_position(price)
+            # If we were LONG, close it first
+            if self.current_side == "LONG":
+                trade_reward = self._close_position(price)
+                
             self.inventory = [price]
             self.current_side = "SHORT"
 
-        # Action 2: CLOSE to Neutral
-        elif action == 2 and self.current_side is not None:
-            trade_reward = self._close_position(price)
+        elif action == 2:
+            # ONLY close if we actually have a position
+            if self.current_side is not None:
+                trade_reward = self._close_position(price)
+            else:
+                # If model chooses CLOSE while FLAT, treat as NO-OP (no reward)
+                pass
 
-        # Action 3: HOLD (Nothing to do)
+        # Action 3: HOLD (Intrinsic No-Op)
 
         self.total_reward += trade_reward
         return action, self.last_probs
 
     def _close_position(self, price):
-        if not self.inventory:
+        if not self.inventory or self.current_side is None:
             return 0.0
 
         entry = self.inventory.pop(0)
@@ -100,34 +101,33 @@ class UnifiedExecutor:
 
     def predict_trajectory(self, indicators, price, horizon=15):
         """
-        Generates an aggregate projection line using the World Model's
-        internal representation of the market state.
+        Generates a projection path by RECURSIVELY HALLUCINATING using the Dynamics Network.
+        This ensures the UI shows EXACTLY what the model is thinking.
         """
         raw_features = self.get_state(indicators, price)
+        model = self.planner.model
 
-        # 1. Use the World Model to encode the state and predict probabilities
-        root_state = self.planner.model.get_initial_state(raw_features)
-        probs, _ = self.planner.model.predict(root_state)
-        probs = cp.asnumpy(probs)[0]
+        # 1. Get current latent state
+        s_latent = model.get_initial_state(raw_features)
+        
+        # 2. Get directional bias from the prediction head
+        probs, _ = model.predict(s_latent)
+        probs_np = cp.asnumpy(probs)[0]
+        bias = probs_np[0] - probs_np[1] # LONG - SHORT
 
-        # Calculate Directional Bias: (P_Long - P_Short)
-        bias = probs[0] - probs[1]
-
-        # Extract Slopes from all agents in the aggregator
-        all_slopes = []
-        for agent in self.aggregator.agents:
-            agent_state = agent.get_state()
-            if len(agent_state) >= 8:
-                all_slopes.append(np.mean(agent_state[4:8]))
-
-        avg_momentum = np.mean(all_slopes) if all_slopes else 0
-
-        # Generate the Aggregate Line (The Consensus Path)
         path = []
-        current_sim_price = price
-        for t in range(1, horizon + 1):
-            change = (bias * avg_momentum) * (t * 0.001)
-            current_sim_price += change
-            path.append(current_sim_price)
+        current_hallucinated_price = price
+        
+        # 3. Step forward in "Mental Time"
+        current_s = s_latent
+        for _ in range(horizon):
+            # Use HOLD signal (0.0) to see market evolution
+            next_s, expected_reward = model.simulate_next(current_s, 0.0)
+            
+            reward_val = float(cp.asnumpy(expected_reward).item())
+            current_hallucinated_price *= (1 + reward_val)
+            path.append(current_hallucinated_price)
+            
+            current_s = next_s
 
         return np.array(path), bias
