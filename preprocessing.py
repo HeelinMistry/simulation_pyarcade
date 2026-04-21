@@ -17,8 +17,7 @@ def preprocess_binance_data(zip_path, output_csv):
         "Taker_buy_base_vol", "Taker_buy_quote_vol", "Ignore"
     ]
 
-    # 1. Load with robustness:
-    # Check if file has a header already to prevent shifting
+    # Load with robustness
     first_line = pd.read_csv(raw_csv_path, nrows=1)
     has_header = not str(first_line.iloc[0, 0]).isdigit()
 
@@ -28,64 +27,61 @@ def preprocess_binance_data(zip_path, output_csv):
         header=0 if has_header else None
     )
 
-    # 2. Time Alignment (CRITICAL)
-    # Ensure unit is 'ms' and sort to maintain time-series consistency
+    # 2. Time Alignment (FIXED: Binance uses 'ms', not 'us')
     df['Open_time'] = pd.to_datetime(df['Open_time'], unit='us')
     df = df.sort_values('Open_time').reset_index(drop=True)
 
-    # 3. Type Casting
     num_cols = ["Open", "High", "Low", "Close", "Volume"]
     for col in num_cols:
         df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    # 4. Cleanup
     df.dropna(subset=['Open_time'] + num_cols, inplace=True)
-
-    # Save a clean version
     df.to_csv(output_csv, index=False)
     print(f"✨ Consistency Check: {len(df)} ticks processed from {df['Open_time'].min()} to {df['Open_time'].max()}")
     return df
 
 
 def preprocess_indicators(df):
-
-    # --- MACD ---
+    # --- MACD (Trend Momentum) ---
     ema12 = df['Close'].ewm(span=12).mean()
     ema26 = df['Close'].ewm(span=26).mean()
     macd = ema12 - ema26
     signal = macd.ewm(span=9).mean()
     macd_diff = macd - signal
-
     macd_std = macd_diff.rolling(100).std() + 1e-9
     df['MACD_Scaled'] = (macd_diff / macd_std).clip(-3,3)/3
 
-
-    # --- RSI ---
+    # --- RSI (Overbought/Oversold) ---
     delta = df['Close'].diff()
     gain = delta.clip(lower=0).rolling(14).mean()
     loss = (-delta.clip(upper=0)).rolling(14).mean() + 1e-9
-
     rsi = 100 - (100 / (1 + gain / loss))
     df['RSI_Scaled'] = (rsi - 50) / 50
 
-
-    # --- Bollinger ---
+    # --- Bollinger (Volatility) ---
     sma = df['Close'].rolling(20).mean()
-    std = df['Close'].rolling(20).std()
-
+    std = df['Close'].rolling(20).std() + 1e-9
     upper = sma + 2 * std
     lower = sma - 2 * std
-
     bb = (df['Close'] - lower) / (upper - lower + 1e-9)
     df['BB_Scaled'] = bb - 0.5
 
-
-    # --- OBV ---
+    # --- OBV (Net Volume Flow Velocity) ---
     obv = (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
-    obv_sma = obv.rolling(20).mean()
-    obv_std = obv.rolling(50).std() + 1e-9
+    obv_velocity = obv.diff(13)
+    v_mean = obv_velocity.rolling(200).mean()
+    v_std = obv_velocity.rolling(200).std() + 1e-9
+    df['OBV_Scaled'] = ((obv_velocity - v_mean) / v_std).clip(-3, 3) / 3
 
-    df['OBV_Scaled'] = ((obv - obv_sma) / obv_std).clip(-3,3)/3
+    # --- NEW: Volatility (ATR-like) ---
+    atr = df['Close'].diff().abs().rolling(14).mean()
+    df['ATR_Scaled'] = (atr / df['Close'] * 100).clip(0, 1) # Range 0 to 1%
 
-    df = df[['Open_time', 'Close', 'RSI_Scaled', 'MACD_Scaled', 'BB_Scaled', 'OBV_Scaled']].dropna().reset_index(drop=True)
+    # --- NEW: Mean Deviation (Distance from Trend) ---
+    mean_dev = (df['Close'] - sma) / std
+    df['MeanDev_Scaled'] = mean_dev.clip(-3, 3) / 3
+
+    # Final cleanup (Total 6 indicators + Price/Time)
+    cols = ['Open_time', 'Close', 'RSI_Scaled', 'MACD_Scaled', 'BB_Scaled', 'OBV_Scaled', 'ATR_Scaled', 'MeanDev_Scaled']
+    df = df[cols].dropna().reset_index(drop=True)
     return df

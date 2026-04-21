@@ -51,35 +51,33 @@ def run_live_sim(symbol="XRP"):
 
     # 3. World Model Setup
     paces = (1, 2, 4, 8, 12)
-    # Math: (5 agents * 12 features) + 2 portfolio features = 62
-    input_size = (len(paces) * 12) + 2
+    # UPDATED: 6 indicators * 3 states (raw, slope, std) * 5 paces + 2 portfolio = 92
+    num_indicators = 6
+    input_size = (num_indicators * 3 * len(paces)) + 2
 
-    # Initialize World Model instead of UnifiedBrain
     model = UnifiedWorldModel(input_size=input_size)
-
-    # Load the triple-network weights (Representation, Dynamics, Prediction)
     model.load("outcomes/best_world_model.pkl")
-    model.lr = 1e-5  # Force stability here
     print(f"🧠 Unified World Model loaded (Input Size: {input_size})")
 
-    planner = MCTSPlanner(model, lookahead_depth=2)
+    planner = MCTSPlanner(model, lookahead_depth=100)
 
-
-    # 4. Unified Executor (Now powered by MCTS Planner)
+    # 4. Unified Executor
     executor = UnifiedExecutor(
         name=f"Live_WM_{symbol}",
         planner=planner,
         paces=paces
     )
+    
+    executor.live_temp = 0.20
+    executor.min_conviction = 0.30
 
     # 5. Launch Simulation Window
     print(f"🚀 Launching World Model UI for {symbol}...")
-    # The UI will call executor.step(), which triggers MCTS lookahead
     window = SimulationEnv(
         data_df=df,
         executor=executor,
         show_chart=True,
-        title=f"World Model Replay: {symbol}USDT"
+        title=f"World Model Live Strategy: {symbol}USDT"
     )
 
     arcade.run()

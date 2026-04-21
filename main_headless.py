@@ -15,19 +15,25 @@ class PositionManager:
         self.position = None
         self.entry = 0.0
         self.commission = commission
+        self.trade_duration = 0
 
     def step(self, action, price):
         reward = 0.0
+        self.trade_duration += 1
+        
         if action == 0 and self.position != "LONG":
             reward = self._close_current(price)
             self.position = "LONG"
             self.entry = price * (1 + self.commission)
+            self.trade_duration = 0
         elif action == 1 and self.position != "SHORT":
             reward = self._close_current(price)
             self.position = "SHORT"
             self.entry = price * (1 - self.commission)
+            self.trade_duration = 0
         elif action == 2:
             reward = self._close_current(price)
+            self.trade_duration = 0
         elif action == 3:
             pass
         return reward
@@ -47,19 +53,26 @@ class PositionManager:
     def reset(self):
         self.position = None
         self.entry = 0.0
+        self.trade_duration = 0
 
 
 # -------------------------------------------------------
 # Training Loop
 # -------------------------------------------------------
-def shape_reward(pnl, side, prediction_corr=0):
-    multiplier = 120 if side == "SHORT" else 100
+def shape_reward(pnl, side, trade_duration=0):
+    multiplier = 400 
     reward = pnl * multiplier
-    if pnl < 0:
-        penalty_scale = 1.8 if side == "SHORT" else 1.5
-        reward *= penalty_scale
-    if prediction_corr > 0.7:
-        reward += 0.05
+
+    # 1. Commitment Penalty: Penalize trades lasting less than 15 ticks
+    if trade_duration < 15 and pnl != 0.0:
+        reward -= 0.1
+
+    # 2. Drawdown Avoidance (Risk Shaping)
+    if pnl < -0.02:  # 2% loss is the "Danger Zone"
+        reward *= 5.0 # Hyper-penalty for major drawdown
+    elif pnl < 0:
+        reward *= 2.0 # Standard loss penalty
+
     return reward
 
 
@@ -89,6 +102,9 @@ def run_stochastic_epoch(executor, indicators, prices, num_trades=15, train=True
             current_raw_features = executor.get_state(indicators[idx], prices[idx])
             action, mcts_probs = executor.planner.search_best_action(current_raw_features)
             
+            if action in (0, 1) and mcts_probs[action] < 0.45:
+                action = 3
+
             if not train:
                 action = int(np.argmax(mcts_probs))
                 if mcts_probs[action] < 0.35: action = 3
@@ -96,11 +112,6 @@ def run_stochastic_epoch(executor, indicators, prices, num_trades=15, train=True
             pnl = pos_mgr.step(action, prices[idx])
             next_idx = min(idx + 1, data_len - 1)
             next_raw_features = executor.get_state(indicators[next_idx], prices[next_idx])
-
-            if action == 0 and pos_mgr.position == "LONG":
-                executor.inventory = [prices[idx]]
-            elif pnl != 0.0:
-                executor.inventory = []
 
             if train:
                 active_trade_sequence.append({
@@ -111,7 +122,7 @@ def run_stochastic_epoch(executor, indicators, prices, num_trades=15, train=True
                 })
 
             if pnl != 0.0:
-                shaped_reward = shape_reward(pnl, pos_mgr.position)
+                shaped_reward = shape_reward(pnl, pos_mgr.position, pos_mgr.trade_duration)
                 if train:
                     for step_data in active_trade_sequence:
                         executor.planner.model.record(
@@ -135,7 +146,7 @@ def run_stochastic_epoch(executor, indicators, prices, num_trades=15, train=True
 
 def run_sim():
     df = update_master_data()
-    features = ["RSI_Scaled", "MACD_Scaled", "BB_Scaled", "OBV_Scaled"]
+    features = ["RSI_Scaled", "MACD_Scaled", "BB_Scaled", "OBV_Scaled", "ATR_Scaled", "MeanDev_Scaled"]
     indicators = df[features].values.astype(np.float32)
     prices = df["Close"].values.astype(np.float32)
 
@@ -144,14 +155,13 @@ def run_sim():
     val_X, val_P = indicators[split:], prices[split:]
 
     paces = (1, 2, 4, 8, 12)
-    input_size = (len(paces) * 12) + 2
+    input_size = (len(features) * 3 * len(paces)) + 2 
     world_model = UnifiedWorldModel(input_size=input_size, hidden_size=128)
 
-    # Load weights AND LR if they exist
     if os.path.exists("outcomes/best_world_model.pkl"):
         world_model.load("outcomes/best_world_model.pkl")
 
-    planner = MCTSPlanner(world_model, lookahead_depth=200)
+    planner = MCTSPlanner(world_model, lookahead_depth=100)
     executor = UnifiedExecutor(name="MainExecutor", planner=planner, paces=paces)
 
     best_val = -np.inf
@@ -160,7 +170,7 @@ def run_sim():
     epoch = 1
     val_history = []
 
-    print(f"🚀 World Model initialized at LR: {world_model.lr:.2e}")
+    print(f"🚀 Training for DRAWDOWN AVOIDANCE | Input Size: {input_size}")
 
     while True:
         train_pnl, avg_corr = run_stochastic_epoch(
@@ -182,15 +192,10 @@ def run_sim():
         else:
             bad_epochs += 1
 
-        # PERMANENT LR DECAY: This now updates the internal value which is saved
-        world_model.lr = max(1e-6, world_model.lr * 0.98)
+        world_model.lr = max(1e-5, world_model.lr * 0.98)
+        print(f"Epoch {epoch:03d} | LR: {world_model.lr:.2e} | Val P/L: {val_pnl:+.2%} (Smooth: {smoothed_val:+.2%}) (Corr: {avg_corr:+.2%})")
 
-        print(
-            f"Epoch {epoch:03d} | LR: {world_model.lr:.2e} | Val P/L: {val_pnl:+.2%} (Smooth: {smoothed_val:+.2%}) (Corr: {avg_corr:+.2%})")
-
-        if bad_epochs >= patience:
-            print(f"🛑 Early stopping reached. Best Smoothed Val: {best_val:.4f}")
-            break
+        if bad_epochs >= patience: break
         epoch += 1
 
 if __name__ == "__main__":
