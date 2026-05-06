@@ -1,16 +1,18 @@
 import cupy as cp
+import random # For epsilon-greedy
 
 
 class MCTSPlanner:
-    def __init__(self, world_model, lookahead_depth=20):
+    def __init__(self, world_model, lookahead_depth=10): # INTERVENTION 2.1: Rollout Truncation
         self.model = world_model
         self.depth = lookahead_depth
-        self.gamma = 0.99 
+        self.gamma = 0.90  # INTERVENTION 2.2: Reduced Gamma for Loss Weighting
 
-    def search_best_action(self, raw_features, temp=0.05):
+    def search_best_action(self, raw_features, temp=0.05, epsilon=0.0): # INTERVENTION 1.3: Epsilon-greedy
         """
-        Runs the mental simulation. 
-        'temp' allows us to control how 'decisive' the resulting probabilities are.
+        Runs a 'Mental Rollout' to find the best action.
+        'temp' controls decisiveness of policy targets.
+        'epsilon' controls exploration during rollout.
         """
         root_state = self.model.get_initial_state(raw_features)
         action_scores = cp.zeros(4) 
@@ -20,17 +22,22 @@ class MCTSPlanner:
             current_s, immediate_r = self.model.simulate_next(root_state, action_sig)
             total_path_reward = float(cp.asnumpy(immediate_r).item())
             
+            # Rollout: Hallucinate 'self.depth' steps into the future
             for d in range(self.depth):
-                probs, _ = self.model.predict(current_s)
-                best_future_action = int(cp.argmax(probs))
+                if random.random() < epsilon: # Epsilon-greedy exploration
+                    best_future_action = random.randrange(4)
+                else:
+                    probs, _ = self.model.predict(current_s)
+                    best_future_action = int(cp.argmax(probs))
+                
                 future_sig = self._action_to_signal(best_future_action)
                 current_s, expected_r = self.model.simulate_next(current_s, future_sig)
+                
                 total_path_reward += (self.gamma ** (d + 1)) * float(cp.asnumpy(expected_r).item())
             
             _, final_v = self.model.predict(current_s)
             action_scores[action_idx] = total_path_reward + (self.gamma ** self.depth) * float(cp.asnumpy(final_v).item())
 
-        # Softmax with the provided temperature
         mcts_probs = self._softmax(action_scores, temp=temp)
         
         best_action = int(cp.argmax(action_scores))

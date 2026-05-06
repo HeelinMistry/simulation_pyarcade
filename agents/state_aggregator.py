@@ -2,9 +2,10 @@ import numpy as np
 from agents.agent_multi_pace import MultiPaceAgent
 
 class StateAggregator:
-    def __init__(self, paces=(1, 2, 4, 8, 12), window=8):
+    def __init__(self, paces=(1, 2, 4, 8, 12), window=8, num_indicators=6):
         self.paces = paces
-        self.agents = [MultiPaceAgent(pace=p, max_history=window) for p in paces]
+        # Pass the correct num_indicators to each agent
+        self.agents = [MultiPaceAgent(pace=p, max_history=window, num_indicators=num_indicators) for p in paces]
         self.tick = 0
 
     def update(self, indicators):
@@ -20,7 +21,7 @@ class StateAggregator:
                 - 'position': -1 (short), 0 (flat), 1 (long)
                 - 'unrealized_pnl': float (e.g., -0.02 for -2%)
         """
-        # 1. Get Market States (12 features per agent * len(paces))
+        # 1. Get Market States (18 features per agent * 5 agents = 90 features)
         market_parts = [agent.get_state() for agent in self.agents]
         market_vector = np.concatenate(market_parts)
 
@@ -33,7 +34,7 @@ class StateAggregator:
                 portfolio_info.get('unrealized_pnl', 0.0)
             ], dtype=np.float32)
 
-        # 3. Final Concatenation
+        # 3. Final Concatenation (Total: 92 features)
         return np.concatenate([market_vector, portfolio_vector]).astype(np.float32)
 
     def warm_up_all(self, indicators, idx):

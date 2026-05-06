@@ -50,12 +50,14 @@ class SimulationEnv(arcade.Window):
             )
             self.chart_shapes.append(line)
 
-        # --- 2. Feature Preparation ---
+        # --- 2. Feature Preparation (FIXED: Added ATR and MeanDev) ---
         indicators = np.array([
             row["RSI_Scaled"],
             row["MACD_Scaled"],
             row["BB_Scaled"],
-            row["OBV_Scaled"]
+            row["OBV_Scaled"],
+            row["ATR_Scaled"],
+            row["MeanDev_Scaled"]
         ], dtype=np.float32)
 
         # --- 3. Execute Brain Step ---
@@ -124,7 +126,6 @@ class SimulationEnv(arcade.Window):
         os.makedirs("outcomes", exist_ok=True)
         filename = f"outcomes/simulation_outcome_{self.executor.name}.png"
         
-        # Capture the color buffer
         image = arcade.get_image()
         image.save(filename)
         

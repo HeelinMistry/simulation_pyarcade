@@ -16,6 +16,7 @@ class PositionManager:
         self.entry = 0.0
         self.commission = commission
         self.trade_duration = 0
+        self.last_action = 3 # Default to HOLD
 
     def step(self, action, price):
         reward = 0.0
@@ -36,6 +37,8 @@ class PositionManager:
             self.trade_duration = 0
         elif action == 3:
             pass
+        
+        self.last_action = action # Update last action after step
         return reward
 
     def _close_current(self, price):
@@ -54,7 +57,7 @@ class PositionManager:
         self.position = None
         self.entry = 0.0
         self.trade_duration = 0
-
+        self.last_action = 3 # Reset to HOLD
 
 # -------------------------------------------------------
 # Training Loop
@@ -63,44 +66,69 @@ def shape_reward(pnl, side, trade_duration=0):
     multiplier = 400 
     reward = pnl * multiplier
 
-    # 1. Commitment Penalty: Penalize trades lasting less than 15 ticks
     if trade_duration < 15 and pnl != 0.0:
         reward -= 0.1
 
-    # 2. Drawdown Avoidance (Risk Shaping)
-    if pnl < -0.02:  # 2% loss is the "Danger Zone"
-        reward *= 5.0 # Hyper-penalty for major drawdown
+    if pnl < -0.02:  
+        reward *= 5.0 
     elif pnl < 0:
-        reward *= 2.0 # Standard loss penalty
+        reward *= 2.0 
 
     return reward
 
 
-def run_stochastic_epoch(executor, indicators, prices, num_trades=15, train=True):
-    data_len = len(prices)
-    total_reward = 0.0
+def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15, train=True):
+    total_reward = 0.0 # Initialized here
     trades_completed = 0
-    pos_mgr = PositionManager()
-    WALK_DURATION = 2000
     correlation_scores = []
+    
+    # print(f"DEBUG: total_reward initialized to {total_reward}") # NEW DEBUG PRINT
+    # print(f"DEBUG: trades_completed initialized to {trades_completed}") # NEW DEBUG PRINT
+    # print(f"DEBUG: correlation_scores initialized to {correlation_scores}") # NEW DEBUG PRINT
+
+    # Use len(indicators_param) directly for data_len consistency
+    data_len = len(indicators_param)
+    # print(f"DEBUG: run_stochastic_epoch - id(indicators_param): {id(indicators_param)}, len(indicators_param): {len(indicators_param)}, len(prices_param): {len(prices_param)}, data_len: {data_len}")
+    
+    pos_mgr = PositionManager()
+    
+
+    WALK_DURATION = 2000
+    min_start_idx = 200
+
+    # Ensure data_len is sufficient for WALK_DURATION and min_start_idx
+    upper_bound_for_start_idx = data_len - WALK_DURATION
+    if upper_bound_for_start_idx < min_start_idx:
+        print(f"ERROR: data_len ({data_len}) is too small for WALK_DURATION ({WALK_DURATION}) and min_start_idx ({min_start_idx}). Adjust WALK_DURATION or data split. Returning 0.0, 0.0.")
+        return 0.0, 0.0 # Return zero PNL and correlation for this epoch
+
+    # INTERVENTION 1.3: Epsilon for MCTS exploration
+    epsilon = 0.1 if train else 0.0 # Only explore during training
 
     while trades_completed < num_trades:
-        start_idx = np.random.randint(200, data_len - WALK_DURATION)
-        executor.aggregator.warm_up_all(indicators, start_idx)
+        start_idx = np.random.randint(min_start_idx, upper_bound_for_start_idx)
+        # print(f"DEBUG: run_stochastic_epoch - start_idx: {start_idx}, upper_bound_for_start_idx: {upper_bound_for_start_idx}")
+        executor.aggregator.warm_up_all(indicators_param, start_idx)
         active_trade_sequence = []
 
         for i in range(WALK_DURATION):
             idx = start_idx + i
 
-            if i % 50 == 0 and (idx + 15) < len(prices):
-                proj_path, bias = executor.predict_trajectory(indicators[idx], prices[idx], horizon=15)
-                real_path = prices[idx + 1:idx + 16]
+            # Ensure all_indicators is correctly indexed
+            if idx >= data_len:
+                print(f"ERROR: idx ({idx}) exceeded data_len ({data_len}) during inner loop. Breaking.")
+                break # Break inner loop if index goes out of bounds
+
+            if i % 50 == 0 and (idx + 15) < data_len: # Use data_len for bounds check
+                proj_path, bias = executor.predict_trajectory(indicators_param[idx], prices_param[idx], horizon=15)
+                real_path = prices_param[idx + 1:idx + 16]
                 if np.std(proj_path) > 1e-9 and np.std(real_path) > 1e-9:
                     corr = np.corrcoef(proj_path, real_path)[0, 1]
                     correlation_scores.append(corr)
 
-            current_raw_features = executor.get_state(indicators[idx], prices[idx])
-            action, mcts_probs = executor.planner.search_best_action(current_raw_features)
+            current_raw_features = next_raw_features
+            
+            action, mcts_probs = executor.planner.search_best_action(current_raw_features, epsilon=epsilon)
             
             if action in (0, 1) and mcts_probs[action] < 0.45:
                 action = 3
@@ -109,14 +137,15 @@ def run_stochastic_epoch(executor, indicators, prices, num_trades=15, train=True
                 action = int(np.argmax(mcts_probs))
                 if mcts_probs[action] < 0.35: action = 3
 
-            pnl = pos_mgr.step(action, prices[idx])
+            pnl = pos_mgr.step(action, prices_param[idx])
             next_idx = min(idx + 1, data_len - 1)
-            next_raw_features = executor.get_state(indicators[next_idx], prices[next_idx])
+            next_raw_features = executor.get_state(indicators_param[next_idx], prices_param[next_idx])
 
             if train:
                 active_trade_sequence.append({
                     'state': current_raw_features,
                     'action': action,
+                    'prev_action': pos_mgr.last_action, # Pass previous action for penalty
                     'next_state': next_raw_features,
                     'mcts_probs': mcts_probs
                 })
@@ -128,6 +157,7 @@ def run_stochastic_epoch(executor, indicators, prices, num_trades=15, train=True
                         executor.planner.model.record(
                             s=step_data['state'],
                             a=step_data['action'],
+                            prev_a=step_data['prev_action'], # Pass previous action
                             next_s=step_data['next_state'],
                             r=shaped_reward,
                             target_pi=step_data['mcts_probs']
@@ -154,6 +184,10 @@ def run_sim():
     train_X, train_P = indicators[:split], prices[:split]
     val_X, val_P = indicators[split:], prices[split:]
 
+    # print(f"DEBUG: run_sim - len(indicators) (full): {len(indicators)}, len(prices) (full): {len(prices)}")
+    # print(f"DEBUG: run_sim - len(train_X): {len(train_X)}, len(train_P): {len(train_P)}")
+    # print(f"DEBUG: run_sim - len(val_X): {len(val_X)}, len(val_P): {len(val_P)}")
+
     paces = (1, 2, 4, 8, 12)
     input_size = (len(features) * 3 * len(paces)) + 2 
     world_model = UnifiedWorldModel(input_size=input_size, hidden_size=128)
@@ -161,7 +195,7 @@ def run_sim():
     if os.path.exists("outcomes/best_world_model.pkl"):
         world_model.load("outcomes/best_world_model.pkl")
 
-    planner = MCTSPlanner(world_model, lookahead_depth=100)
+    planner = MCTSPlanner(world_model, lookahead_depth=10)
     executor = UnifiedExecutor(name="MainExecutor", planner=planner, paces=paces)
 
     best_val = -np.inf
@@ -170,7 +204,7 @@ def run_sim():
     epoch = 1
     val_history = []
 
-    print(f"🚀 Training for DRAWDOWN AVOIDANCE | Input Size: {input_size}")
+    print(f"🚀 Training for GENERALIZED LOGIC | Input Size: {input_size}")
 
     while True:
         train_pnl, avg_corr = run_stochastic_epoch(

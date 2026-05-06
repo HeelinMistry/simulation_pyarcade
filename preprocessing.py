@@ -27,7 +27,7 @@ def preprocess_binance_data(zip_path, output_csv):
         header=0 if has_header else None
     )
 
-    # 2. Time Alignment (FIXED: Binance uses 'ms', not 'us')
+    # 2. Time Alignment (FIXED: Binance uses 'us', not 'ms')
     df['Open_time'] = pd.to_datetime(df['Open_time'], unit='us')
     df = df.sort_values('Open_time').reset_index(drop=True)
 
