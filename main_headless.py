@@ -152,6 +152,9 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
             next_raw_features = executor.get_state(indicators_param[next_idx], prices_param[next_idx])
 
             if train:
+                # Cap active_trade_sequence at ~100 entries (rolling window)
+                if len(active_trade_sequence) >= 100:
+                    active_trade_sequence.pop(0)
                 active_trade_sequence.append({
                     'state': current_raw_features,
                     'action': action,
