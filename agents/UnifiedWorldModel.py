@@ -8,12 +8,14 @@ import pickle
 class UnifiedWorldModel:
     def __init__(self, input_size=92, hidden_size=128, lr=1e-4):
         self.W_repr = self._init_weights(input_size, hidden_size)
-        self.W_dyn = self._init_weights(hidden_size + 1, hidden_size + 1)
+        self.W_dyn_state = self._init_weights(hidden_size + 1, hidden_size)
+        self.W_dyn_reward = self._init_weights(hidden_size + 1, 1)
         self.W_pred = self._init_weights(hidden_size, 4 + 1)
 
         self.lr = lr
         self.memory = deque(maxlen=20000)
         self.batch_size = 64
+        self.hidden_size = hidden_size # Store hidden_size for later use
         
         # --- INTERVENTION 1: POLICY COLLAPSE FIX ---
         self.entropy_beta = 0.05  # Changed to positive to ADD entropy bonus (target > 1.5 bits)
@@ -46,8 +48,11 @@ class UnifiedWorldModel:
         action_arr = cp.asarray(action)
         action_input = cp.full((batch_size, 1), action_arr, dtype=cp.float32) if action_arr.size == 1 else action_arr.reshape(batch_size, 1)
         combined = cp.concatenate([s, action_input], axis=1)
-        out = cp.tanh(combined @ self.W_dyn)
-        return out[:, :-1], out[:, -1:]
+        
+        pred_next_latent = cp.tanh(combined @ self.W_dyn_state)
+        pred_reward = combined @ self.W_dyn_reward # Reward head typically doesn't use tanh for direct reward prediction
+        
+        return pred_next_latent, pred_reward
 
     def predict(self, s):
         if s.ndim == 1: s = s.reshape(1, -1)
@@ -93,8 +98,11 @@ class UnifiedWorldModel:
         pred_probs, pred_value = self._softmax(pred_out[:, :4]), pred_out[:, 4:]
         
         dyn_input = cp.concatenate([s_latent, A_continuous], axis=1)
-        dyn_out = cp.tanh(dyn_input @ self.W_dyn)
-        pred_next_latent, pred_reward = dyn_out[:, :-1], dyn_out[:, -1:]
+        
+        # Split dynamics forward pass
+        pred_next_latent = cp.tanh(dyn_input @ self.W_dyn_state)
+        pred_reward = dyn_input @ self.W_dyn_reward
+        
         true_next_latent = cp.tanh(Next_S @ self.W_repr) # Note: true_next_latent is derived from raw Next_S, not S_processed
 
         # --- LOSSES ---
@@ -118,37 +126,46 @@ class UnifiedWorldModel:
         
         dW_pred, dS_from_pred = s_latent.T @ dZ_pred, dZ_pred @ self.W_pred.T
 
-        dZ_dyn = cp.concatenate([(pred_next_latent - true_next_latent)/self.batch_size, (pred_reward - R)/self.batch_size], axis=1) * (1 - dyn_out ** 2)
-        dW_dyn, dS_from_dyn = dyn_input.T @ dZ_dyn, (dZ_dyn @ self.W_dyn.T)[:, :-1]
+        # Split dynamics backward pass
+        dZ_pred_next_latent = (pred_next_latent - true_next_latent) / self.batch_size * (1 - pred_next_latent ** 2) # Apply tanh derivative
+        dZ_pred_reward = (pred_reward - R) / self.batch_size
+
+        dW_dyn_state, dS_from_dyn_state = dyn_input.T @ dZ_pred_next_latent, dZ_pred_next_latent @ self.W_dyn_state.T
+        dW_dyn_reward, dS_from_dyn_reward = dyn_input.T @ dZ_pred_reward, dZ_pred_reward @ self.W_dyn_reward.T
+
+        dS_from_dyn = dS_from_dyn_state + dS_from_dyn_reward
 
         # INTERVENTION 4.2: TEMPORAL CONTRASTIVE LOSS
         # Forces s_latent and pred_next_latent to be close (reduces drift)
         temporal_loss_grad = (s_latent - pred_next_latent) * self.temporal_contrastive_lambda
-        dS_from_dyn += temporal_loss_grad # Add to gradient flowing back to s_latent from dynamics
+        # Fix: Only add temporal_loss_grad to the state portion of dS_from_dyn
+        dS_from_dyn[:, :self.hidden_size] += temporal_loss_grad # Add to gradient flowing back to s_latent from dynamics
 
-        dW_repr = S_processed.T @ ((dS_from_pred + dS_from_dyn + (self.latent_lambda * cp.sign(s_latent))) * (1 - s_latent ** 2))
+        dW_repr = S_processed.T @ ((dS_from_pred + dS_from_dyn[:, :self.hidden_size] + (self.latent_lambda * cp.sign(s_latent))) * (1 - s_latent ** 2))
 
-        for grad in [dW_pred, dW_dyn, dW_repr]: cp.clip(grad, -self.max_grad_norm, self.max_grad_norm, out=grad)
+        for grad in [dW_pred, dW_dyn_state, dW_dyn_reward, dW_repr]: cp.clip(grad, -self.max_grad_norm, self.max_grad_norm, out=grad)
         
         # --- WEIGHT UPDATES + L1 REGULARIZATION ---
         # INTERVENTION 4.1: Increased L1 for Repr and Pred heads
         self.W_pred -= self.lr * (dW_pred + self.l1_lambda_pred * cp.sign(self.W_pred))
-        self.W_dyn -= self.lr * (dW_dyn + self.l1_lambda_dyn * cp.sign(self.W_dyn))
+        self.W_dyn_state -= self.lr * (dW_dyn_state + self.l1_lambda_dyn * cp.sign(self.W_dyn_state))
+        self.W_dyn_reward -= self.lr * (dW_dyn_reward + self.l1_lambda_dyn * cp.sign(self.W_dyn_reward)) # Apply L1 to reward head too
         self.W_repr -= self.lr * (dW_repr + self.l1_lambda_repr * cp.sign(self.W_repr))
 
         # HARD PROXIMAL PRUNING
         self.W_pred = cp.where(cp.abs(self.W_pred) < self.prune_threshold, 0, self.W_pred)
-        self.W_dyn = cp.where(cp.abs(self.W_dyn) < self.prune_threshold, 0, self.W_dyn)
+        self.W_dyn_state = cp.where(cp.abs(self.W_dyn_state) < self.prune_threshold, 0, self.W_dyn_state)
+        self.W_dyn_reward = cp.where(cp.abs(self.W_dyn_reward) < self.prune_threshold, 0, self.W_dyn_reward)
         self.W_repr = cp.where(cp.abs(self.W_repr) < self.prune_threshold, 0, self.W_repr)
 
     def save(self, path="outcomes/best_world_model.pkl"):
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        data = {"W_repr": cp.asnumpy(self.W_repr), "W_dyn": cp.asnumpy(self.W_dyn), "W_pred": cp.asnumpy(self.W_pred), "input_size": self.W_repr.shape[0], "lr": self.lr}
+        data = {"W_repr": cp.asnumpy(self.W_repr), "W_dyn_state": cp.asnumpy(self.W_dyn_state), "W_dyn_reward": cp.asnumpy(self.W_dyn_reward), "W_pred": cp.asnumpy(self.W_pred), "input_size": self.W_repr.shape[0], "lr": self.lr}
         with open(path, "wb") as f: pickle.dump(data, f)
 
     def load(self, path="outcomes/best_world_model.pkl"):
         if not os.path.exists(path): return
         with open(path, "rb") as f: data = pickle.load(f)
         if data.get("input_size", 0) != self.W_repr.shape[0]: return
-        self.W_repr, self.W_dyn, self.W_pred, self.lr = cp.asarray(data["W_repr"]), cp.asarray(data["W_dyn"]), cp.asarray(data["W_pred"]), data.get("lr", self.lr)
+        self.W_repr, self.W_dyn_state, self.W_dyn_reward, self.W_pred, self.lr = cp.asarray(data["W_repr"]), cp.asarray(data["W_dyn_state"]), cp.asarray(data["W_dyn_reward"]), cp.asarray(data["W_pred"]), data.get("lr", self.lr)
         print(f"World Model loaded. Resuming at LR: {self.lr:.2e}")

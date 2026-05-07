@@ -74,8 +74,7 @@ class UnifiedExecutor:
     def get_status(self):
         return {"position": self.current_side if self.current_side else "FLAT", "pnl": self.total_reward}
 
-    def predict_trajectory(self, indicators, price, horizon=15):
-        raw_features = self.get_state(indicators, price)
+    def predict_trajectory(self, raw_features, price, horizon=15): # Modified signature
         model = self.planner.model
         s_latent = model.get_initial_state(raw_features)
         probs, _ = model.predict(s_latent)
