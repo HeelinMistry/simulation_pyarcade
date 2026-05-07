@@ -63,22 +63,20 @@ class PositionManager:
 # -------------------------------------------------------
 # Training Loop
 # -------------------------------------------------------
-def shape_reward(pnl, trade_duration=0): # Removed 'side' parameter
+def shape_reward(pnl, trade_duration=0):
     multiplier = 400
     reward = pnl * multiplier
 
     if trade_duration < 15 and pnl != 0.0:
         reward -= 0.1
 
-    if pnl < -0.02:
-        reward *= 5.0
-    elif pnl < 0:
-        reward *= 2.0
+    # Symmetric scaling for both gains and losses
+    # No special multipliers for negative PNL, it's already scaled by 'multiplier'
 
     # Normalize the reward to be within a reasonable range, e.g., [-1, 1]
-    # Assuming max possible reward is around 20 (0.05 * 400) and min is -100 (-0.05 * 400 * 5)
-    # Dividing by 100 brings most values into [-1, 1]
-    reward /= 100.0
+    # Assuming max possible reward is around 20 (0.05 * 400) and min is -20 (-0.05 * 400)
+    # Dividing by 20 brings most values into [-1, 1]
+    reward /= 20.0 # Adjusted normalization factor
 
     return reward
 
@@ -163,7 +161,7 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
                 })
 
             if pnl != 0.0:
-                shaped_reward = shape_reward(pnl, pos_mgr.trade_duration) # Removed 'pos_mgr.position'
+                shaped_reward = shape_reward(pnl, pos_mgr.trade_duration)
                 if train:
                     # Assign 0 reward to all intermediate steps
                     for step_data in active_trade_sequence[:-1]:

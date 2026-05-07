@@ -82,14 +82,17 @@ class UnifiedWorldModel:
 
         # --- INTERVENTION 5: FEATURE ABLATION ---
         S_processed = S
+        Next_S_processed = Next_S # Initialize for case where dropout_rate is 0
         if self.feature_ablation_mask is not None:
             # Apply the mask to zero-out specific features
             S_processed = S * cp.asarray(self.feature_ablation_mask, dtype=cp.float32)
+            Next_S_processed = Next_S * cp.asarray(self.feature_ablation_mask, dtype=cp.float32) # Apply to next state too
 
         # --- FEATURE DROPOUT (Specialization Trigger) ---
         if self.dropout_rate > 0:
             mask = cp.random.choice([0.0, 1.0], size=S_processed.shape, p=[self.dropout_rate, 1-self.dropout_rate])
             S_processed = S_processed * mask
+            Next_S_processed = Next_S_processed * mask # Apply the same mask to Next_S_processed
         
         s_latent = cp.tanh(S_processed @ self.W_repr)
         
@@ -103,7 +106,7 @@ class UnifiedWorldModel:
         pred_next_latent = cp.tanh(dyn_input @ self.W_dyn_state)
         pred_reward = dyn_input @ self.W_dyn_reward
         
-        true_next_latent = cp.tanh(Next_S @ self.W_repr) # Note: true_next_latent is derived from raw Next_S, not S_processed
+        true_next_latent = cp.tanh(Next_S_processed @ self.W_repr) # Note: true_next_latent is derived from masked Next_S_processed
 
         # --- LOSSES ---
         dZ_policy = (pred_probs - Pi) / self.batch_size
