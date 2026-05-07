@@ -147,6 +147,7 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
                 action = int(np.argmax(mcts_probs))
                 if mcts_probs[action] < 0.35: action = 3
 
+            prev_action_for_record = pos_mgr.last_action      # ← save BEFORE step updates it
             trade_duration_before_step = pos_mgr.trade_duration # Save duration before step() resets it
             pnl = pos_mgr.step(action, prices_param[idx])
 
@@ -161,7 +162,7 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
                 active_trade_sequence.append({
                     'state': current_raw_features,
                     'action': action,
-                    'prev_action': pos_mgr.last_action,  # Pass previous action for penalty
+                    'prev_action': prev_action_for_record,     # ← use saved value
                     'next_state': next_raw_features,
                     'mcts_probs': mcts_probs
                 })
