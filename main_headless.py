@@ -151,6 +151,10 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
             trade_duration_before_step = pos_mgr.trade_duration # Save duration before step() resets it
             pnl = pos_mgr.step(action, prices_param[idx])
 
+            # After pos_mgr.step(), sync executor position so portfolio features are live
+            executor.current_side = pos_mgr.position
+            executor.inventory = [pos_mgr.entry] if pos_mgr.position is not None else []
+
             # Calculate the next_raw_features for the *next* iteration
             next_idx = min(idx + 1, data_len - 1)
             next_raw_features = executor.get_state(indicators_param[next_idx], prices_param[next_idx])
