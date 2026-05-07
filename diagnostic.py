@@ -18,7 +18,9 @@ def analyze_world_model(paces=(1, 2, 4, 8, 12)):
     model.load("outcomes/best_world_model.pkl")
 
     w_repr = cp.asnumpy(model.W_repr)
-    w_dyn = cp.asnumpy(model.W_dyn)
+    w_dyn_state = cp.asnumpy(model.W_dyn_state)
+    w_dyn_reward = cp.asnumpy(model.W_dyn_reward)
+    w_dyn = cp.asnumpy(cp.concatenate([model.W_dyn_state, model.W_dyn_reward], axis=1)) # Combined for visualization
     w_pred = cp.asnumpy(model.W_pred)
 
     fig = plt.figure(figsize=(24, 16))
@@ -67,16 +69,16 @@ def analyze_world_model(paces=(1, 2, 4, 8, 12)):
     plt.tight_layout()
     plt.savefig("outcomes/world_model_diagnostic.png")
     
-    run_numerical_health_check(model, w_repr, w_dyn, w_pred, input_size)
+    run_numerical_health_check(model, w_repr, w_dyn_state, w_dyn_reward, w_pred, input_size)
     plt.show()
 
 
-def run_numerical_health_check(model, w_repr, w_dyn, w_pred, input_size):
+def run_numerical_health_check(model, w_repr, w_dyn_state, w_dyn_reward, w_pred, input_size):
     print("\n--- 🩺 WORLD MODEL HEALTH & BIAS CHECK ---")
     
     # 1. Sparsity
     get_sparse = lambda w: np.sum(np.abs(w) < 1e-5) / w.size
-    print(f"Repr Sparsity: {get_sparse(w_repr):.1%} | Dyn: {get_sparse(w_dyn):.1%} | Pred: {get_sparse(w_pred):.1%}")
+    print(f"Repr Sparsity: {get_sparse(w_repr):.1%} | Dyn_State: {get_sparse(w_dyn_state):.1%} | Dyn_Reward: {get_sparse(w_dyn_reward):.1%} | Pred: {get_sparse(w_pred):.1%}")
 
     # 2. Hallucination Drift
     test_input = cp.random.randn(10, input_size).astype(cp.float32)

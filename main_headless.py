@@ -113,6 +113,8 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
         start_idx = np.random.randint(min_start_idx, upper_bound_for_start_idx)
         # print(f"DEBUG: run_stochastic_epoch - start_idx: {start_idx}, upper_bound_for_start_idx: {upper_bound_for_start_idx}")
         executor.aggregator.warm_up_all(indicators_param, start_idx)
+        executor.current_side = None
+        executor.inventory = []
         active_trade_sequence = []
 
         # Initialize next_raw_features for the first iteration
