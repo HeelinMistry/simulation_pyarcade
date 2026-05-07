@@ -147,6 +147,7 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
                 action = int(np.argmax(mcts_probs))
                 if mcts_probs[action] < 0.35: action = 3
 
+            trade_duration_before_step = pos_mgr.trade_duration # Save duration before step() resets it
             pnl = pos_mgr.step(action, prices_param[idx])
 
             # Calculate the next_raw_features for the *next* iteration
@@ -166,7 +167,7 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
                 })
 
             if pnl != 0.0:
-                shaped_reward = shape_reward(pnl, pos_mgr.trade_duration)
+                shaped_reward = shape_reward(pnl, trade_duration_before_step) # Use the saved duration
                 if train:
                     # Assign 0 reward to all intermediate steps
                     for step_data in active_trade_sequence[:-1]:

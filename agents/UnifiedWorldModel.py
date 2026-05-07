@@ -118,10 +118,9 @@ class UnifiedWorldModel:
 
         # INTERVENTION 1.1: ACTION PENALTY (for repeating same action)
         # Discourage mode locking by penalizing if current action == previous action
+        repeat_mask = (A_discrete == Prev_A_discrete) & ((A_discrete == 0) | (A_discrete == 1))
         action_repeat_penalty = cp.zeros_like(pred_probs)
-        for i in range(self.batch_size):
-            if A_discrete[i] == Prev_A_discrete[i] and A_discrete[i] in [0, 1]: # Only penalize repeating LONG/SHORT
-                action_repeat_penalty[i, A_discrete[i]] = self.action_penalty_lambda
+        action_repeat_penalty[cp.arange(self.batch_size)[repeat_mask], A_discrete[repeat_mask]] = self.action_penalty_lambda
         dZ_policy += action_repeat_penalty / self.batch_size
 
         dZ_value = (pred_value - R) / self.batch_size
