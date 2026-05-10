@@ -86,6 +86,11 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
     trades_completed = 0
     correlation_scores = []
 
+    # Initialize EMA for reward normalization
+    reward_mean_ema = 0.0
+    reward_var_ema = 1.0 # Initialize variance to 1.0 to avoid division by zero initially
+    alpha = 0.05 # EMA smoothing factor
+
     # print(f"DEBUG: total_reward initialized to {total_reward}") # NEW DEBUG PRINT
     # print(f"DEBUG: trades_completed initialized to {trades_completed}") # NEW DEBUG PRINT
     # print(f"DEBUG: correlation_scores initialized to {correlation_scores}") # NEW DEBUG PRINT
@@ -173,6 +178,24 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
 
             if pnl != 0.0:
                 shaped_reward = shape_reward(pnl, trade_duration_before_step) # Use the saved duration
+
+                if train:
+                    # Update running mean (baseline)
+                    reward_mean_ema = (1 - alpha) * reward_mean_ema + alpha * shaped_reward
+
+                    # Update running variance (using the new mean)
+                    reward_var_ema = (1 - alpha) * reward_var_ema + alpha * (shaped_reward - reward_mean_ema)**2
+
+                    # Calculate running standard deviation, ensuring it's not zero
+                    reward_std_ema = np.sqrt(reward_var_ema)
+                    if reward_std_ema < 1e-8: # Add a small epsilon to prevent division by zero
+                        reward_std_ema = 1.0
+
+                    # Normalize the shaped reward
+                    shaped_reward_centred = (shaped_reward - reward_mean_ema) / reward_std_ema
+                else:
+                    shaped_reward_centred = shaped_reward # No centering/scaling if not training
+
                 if train:
                     # Assign 0 reward to all intermediate steps
                     for step_data in active_trade_sequence[:-1]:
@@ -184,14 +207,14 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
                             r=0.0, # Intermediate steps get 0 reward
                             target_pi=step_data['mcts_probs']
                         )
-                    # Assign shaped_reward only to the last step (the one that closed the trade)
+                    # Assign shaped_reward_centred only to the last step (the one that closed the trade)
                     last_step_data = active_trade_sequence[-1]
                     executor.planner.model.record(
                         s=last_step_data['state'],
                         a=last_step_data['action'],
                         prev_a=last_step_data['prev_action'],
                         next_s=last_step_data['next_state'],
-                        r=shaped_reward, # Only the closing step gets the shaped reward
+                        r=shaped_reward_centred, # Only the closing step gets the shaped and normalized reward
                         target_pi=last_step_data['mcts_probs']
                     )
                     executor.planner.model.learn_from_memory()
@@ -214,7 +237,7 @@ def run_sim():
 
     split = int(len(indicators) * 0.8)
     train_X, train_P = indicators[:split], prices[:split]
-    val_X, val_P = indicators[split:], prices[split:]
+    val_X, val_P = indicators[split:], prices[:split]
 
     # print(f"DEBUG: run_sim - len(indicators) (full): {len(indicators)}, len(prices) (full): {len(prices)}")
     # print(f"DEBUG: run_sim - len(train_X): {len(train_X)}, len(train_P): {len(train_P)}")
