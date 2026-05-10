@@ -24,6 +24,7 @@ class UnifiedWorldModel:
         # --- INTERVENTION 4: AGGRESSIVE SPARSITY & BOTTLENECKING ---
         self.l1_lambda_repr = 8e-4 # INCREASED to force Repr Sparsity > 10%
         self.l1_lambda_pred = 5e-4 # Increased L1 for Prediction head (target 20-40% sparsity)
+        self.l1_lambda_value = 1e-4 # New: Lower L1 for value head to prevent aggressive pruning
         self.l1_lambda_dyn = 5e-4  # INCREASED to clean up the Hallucination Engine
         self.latent_lambda = 5e-3  # Increased latent sparsity
         self.temporal_contrastive_lambda = 0.01 # New: Forces z_t and predicted z_t+1 to be close
@@ -149,7 +150,11 @@ class UnifiedWorldModel:
         
         # --- WEIGHT UPDATES + L1 REGULARIZATION ---
         # INTERVENTION 4.1: Increased L1 for Repr and Pred heads
-        self.W_pred -= self.lr * (dW_pred + self.l1_lambda_pred * cp.sign(self.W_pred))
+        # Apply different L1 regularization to policy and value heads
+        l1_policy_term = self.l1_lambda_pred * cp.sign(self.W_pred[:, :4])
+        l1_value_term = self.l1_lambda_value * cp.sign(self.W_pred[:, 4:])
+        self.W_pred -= self.lr * (dW_pred + cp.concatenate([l1_policy_term, l1_value_term], axis=1))
+
         self.W_dyn_state -= self.lr * (dW_dyn_state + self.l1_lambda_dyn * cp.sign(self.W_dyn_state))
         self.W_dyn_reward -= self.lr * (dW_dyn_reward + self.l1_lambda_dyn * cp.sign(self.W_dyn_reward)) # Apply L1 to reward head too
         self.W_repr -= self.lr * (dW_repr + self.l1_lambda_repr * cp.sign(self.W_repr))
