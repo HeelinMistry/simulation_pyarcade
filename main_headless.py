@@ -112,7 +112,8 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
         return 0.0, 0.0  # Return zero PNL and correlation for this epoch
 
     # INTERVENTION 1.3: Epsilon for MCTS exploration
-    epsilon = 0.1 if train else 0.0  # Only explore during training
+    # Default epsilon, can be overridden dynamically below
+    default_epsilon = 0.1 if train else 0.0
 
     while trades_completed < num_trades:
         start_idx = np.random.randint(min_start_idx, upper_bound_for_start_idx)
@@ -143,7 +144,21 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
                     corr = np.corrcoef(proj_path, real_path)[0, 1]
                     correlation_scores.append(corr)
 
-            action, mcts_probs = executor.planner.search_best_action(current_raw_features, epsilon=epsilon)
+            current_epsilon = default_epsilon
+            if train:
+                # Symmetry check for LONG starvation
+                recent = list(executor.planner.model.memory)[-50:]
+                # Assuming action 1 is SHORT based on PositionManager
+                # The 'a' (action) is the second element in the tuple recorded in memory (index 1)
+                short_rate = sum(1 for x in recent if x[1] == 1) / max(len(recent), 1)
+                if short_rate > 0.70:
+                    current_epsilon = 0.5 # Force LONG exploration
+                else:
+                    current_epsilon = 0.1 # Revert to default exploration
+            else:
+                current_epsilon = 0.0 # No exploration during validation
+
+            action, mcts_probs = executor.planner.search_best_action(current_raw_features, epsilon=current_epsilon)
 
             if action in (0, 1) and mcts_probs[action] < 0.45:
                 action = 3
@@ -237,7 +252,7 @@ def run_sim():
 
     split = int(len(indicators) * 0.8)
     train_X, train_P = indicators[:split], prices[:split]
-    val_X, val_P = indicators[split:], prices[:split]
+    val_X, val_P = indicators[split:], prices[split:]
 
     # print(f"DEBUG: run_sim - len(indicators) (full): {len(indicators)}, len(prices) (full): {len(prices)}")
     # print(f"DEBUG: run_sim - len(train_X): {len(train_X)}, len(train_P): {len(train_P)}")
