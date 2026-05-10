@@ -18,7 +18,7 @@ class UnifiedWorldModel:
         self.hidden_size = hidden_size # Store hidden_size for later use
         
         # --- INTERVENTION 1: POLICY COLLAPSE FIX ---
-        self.entropy_beta = 0.05  # Changed to positive to ADD entropy bonus (target > 1.5 bits)
+        self.entropy_beta = 0.02  # Changed to positive to ADD entropy bonus (target > 1.5 bits)
         self.action_penalty_lambda = 0.01 # New: Penalty for repeating same action
 
         # --- INTERVENTION 4: AGGRESSIVE SPARSITY & BOTTLENECKING ---
