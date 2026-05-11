@@ -76,6 +76,9 @@ class UnifiedExecutor:
 
     def predict_trajectory(self, raw_features, price, horizon=15): # Modified signature
         model = self.planner.model
+        # Add assertion to ensure raw_features is not already a latent vector
+        assert raw_features.shape[-1] == model.W_repr.shape[0], \
+            f"predict_trajectory received latent vector (shape {raw_features.shape[-1]}), expected raw state (shape {model.W_repr.shape[0]})"
         s_latent = model.get_initial_state(raw_features)
         probs, _ = model.predict(s_latent)
         probs_np = cp.asnumpy(probs)[0]

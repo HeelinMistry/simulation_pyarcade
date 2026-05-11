@@ -76,8 +76,11 @@ def preprocess_indicators(df):
     df['OBV_Scaled'] = ((obv_velocity - v_mean) / v_std).clip(-3, 3) / 3
 
     # --- NEW: Volatility (ATR-like) ---
-    atr = df['Close'].diff().abs().rolling(14).mean()
-    df['ATR_Scaled'] = (atr / df['Close'] * 100).clip(0, 1) # Range 0 to 1%
+    atr_raw = df['Close'].diff().abs().rolling(14).mean()
+    atr_pct = atr_raw / df['Close'] * 100
+    atr_mean = atr_pct.rolling(200).mean()
+    atr_std  = atr_pct.rolling(200).std() + 1e-9
+    df['ATR_Scaled'] = ((atr_pct - atr_mean) / atr_std).clip(-3, 3) / 3
 
     # --- NEW: Mean Deviation (Distance from Trend) ---
     mean_dev = (df['Close'] - sma) / std

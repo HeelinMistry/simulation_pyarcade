@@ -20,26 +20,31 @@ class PositionManager:
 
     def step(self, action, price):
         reward = 0.0
+        closed_trade_duration = 0  # Initialize to 0
+
         self.trade_duration += 1
 
         if action == 0 and self.position != "LONG":
             reward = self._close_current(price)
+            closed_trade_duration = self.trade_duration # Capture duration before reset
             self.position = "LONG"
             self.entry = price * (1 + self.commission)
             self.trade_duration = 0
         elif action == 1 and self.position != "SHORT":
             reward = self._close_current(price)
+            closed_trade_duration = self.trade_duration # Capture duration before reset
             self.position = "SHORT"
             self.entry = price * (1 - self.commission)
             self.trade_duration = 0
         elif action == 2:
             reward = self._close_current(price)
+            closed_trade_duration = self.trade_duration # Capture duration before reset
             self.trade_duration = 0
         elif action == 3:
             pass
 
         self.last_action = action  # Update last action after step
-        return reward
+        return reward, closed_trade_duration # Return both reward and closed_trade_duration
 
     def _close_current(self, price):
         if self.position is None: return 0.0
@@ -168,8 +173,8 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
                 if mcts_probs[action] < 0.35: action = 3
 
             prev_action_for_record = pos_mgr.last_action      # ← save BEFORE step updates it
-            trade_duration_before_step = pos_mgr.trade_duration # Save duration before step() resets it
-            pnl = pos_mgr.step(action, prices_param[idx])
+            # trade_duration_before_step = pos_mgr.trade_duration # Removed this line
+            pnl, closed_trade_duration = pos_mgr.step(action, prices_param[idx]) # Unpack the returned values
 
             # After pos_mgr.step(), sync executor position so portfolio features are live
             executor.current_side = pos_mgr.position
@@ -192,7 +197,7 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
                 })
 
             if pnl != 0.0:
-                shaped_reward = shape_reward(pnl, trade_duration_before_step) # Use the saved duration
+                shaped_reward = shape_reward(pnl, closed_trade_duration) # Use the new closed_trade_duration
 
                 if train:
                     # Update running mean (baseline)
