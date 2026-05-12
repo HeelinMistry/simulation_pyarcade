@@ -2,7 +2,7 @@ import numpy as np
 
 
 class MultiPaceAgent:
-    def __init__(self, pace, max_history=8, num_indicators=4): # Added num_indicators
+    def __init__(self, pace, max_history=8, num_indicators=6): # Added num_indicators
         self.pace = pace
         self.history = []
         self.max_history = max_history

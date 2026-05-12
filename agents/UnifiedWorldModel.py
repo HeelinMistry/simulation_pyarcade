@@ -173,6 +173,10 @@ class UnifiedWorldModel:
     def load(self, path="outcomes/best_world_model.pkl"):
         if not os.path.exists(path): return
         with open(path, "rb") as f: data = pickle.load(f)
-        if data.get("input_size", 0) != self.W_repr.shape[0]: return
+        if data.get("input_size", 0) != self.W_repr.shape[0]:
+            print(f"⚠️  Checkpoint input_size mismatch "
+                  f"(file={data.get('input_size')}, expected={self.W_repr.shape[0]}). "
+                  f"Load skipped — training from scratch.")
+            return
         self.W_repr, self.W_dyn_state, self.W_dyn_reward, self.W_pred, self.lr = cp.asarray(data["W_repr"]), cp.asarray(data["W_dyn_state"]), cp.asarray(data["W_dyn_reward"]), cp.asarray(data["W_pred"]), data.get("lr", self.lr)
         print(f"World Model loaded. Resuming at LR: {self.lr:.2e}")

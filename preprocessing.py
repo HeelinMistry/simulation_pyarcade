@@ -87,6 +87,6 @@ def preprocess_indicators(df):
     df['MeanDev_Scaled'] = mean_dev.clip(-3, 3) / 3
 
     # Final cleanup (Total 6 indicators + Price/Time)
-    cols = ['Open_time', 'Close', 'RSI_Scaled', 'MACD_Scaled', 'BB_Scaled', 'OBV_Scaled', 'ATR_Scaled', 'MeanDev_Scaled']
+    cols = ['Open_time', 'Close', 'Volume', 'RSI_Scaled', 'MACD_Scaled', 'BB_Scaled', 'OBV_Scaled', 'ATR_Scaled', 'MeanDev_Scaled']
     df = df[cols].dropna().reset_index(drop=True)
     return df

@@ -73,7 +73,7 @@ def shape_reward(pnl, trade_duration=0):
     reward = pnl * multiplier
 
     if trade_duration < 15 and pnl != 0.0:
-        reward -= 0.1
+        reward -= 0.05
 
     # Symmetric scaling for both gains and losses
     # No special multipliers for negative PNL, it's already scaled by 'multiplier'
@@ -96,13 +96,8 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
     reward_var_ema = 1.0 # Initialize variance to 1.0 to avoid division by zero initially
     alpha = 0.05 # EMA smoothing factor
 
-    # print(f"DEBUG: total_reward initialized to {total_reward}") # NEW DEBUG PRINT
-    # print(f"DEBUG: trades_completed initialized to {trades_completed}") # NEW DEBUG PRINT
-    # print(f"DEBUG: correlation_scores initialized to {correlation_scores}") # NEW DEBUG PRINT
-
     # Use len(indicators_param) directly for data_len consistency
     data_len = len(indicators_param)
-    # print(f"DEBUG: run_stochastic_epoch - id(indicators_param): {id(indicators_param)}, len(indicators_param): {len(indicators_param)}, len(prices_param): {len(prices_param)}, data_len: {data_len}")
 
     pos_mgr = PositionManager()
 
@@ -170,7 +165,7 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
 
             if not train:
                 action = int(np.argmax(mcts_probs))
-                if mcts_probs[action] < 0.35: action = 3
+                if mcts_probs[action] < 0.45: action = 3
 
             prev_action_for_record = pos_mgr.last_action      # ← save BEFORE step updates it
             # trade_duration_before_step = pos_mgr.trade_duration # Removed this line
@@ -243,6 +238,10 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
                 trades_completed += 1
                 active_trade_sequence = []
                 pos_mgr.reset()
+
+                # Re-sync executor to match pos_mgr flat state after reset
+                executor.current_side = None
+                executor.inventory = []
             if trades_completed >= num_trades: break
 
     avg_corr = np.mean(correlation_scores) if correlation_scores else 0
@@ -258,10 +257,6 @@ def run_sim():
     split = int(len(indicators) * 0.8)
     train_X, train_P = indicators[:split], prices[:split]
     val_X, val_P = indicators[split:], prices[split:]
-
-    # print(f"DEBUG: run_sim - len(indicators) (full): {len(indicators)}, len(prices) (full): {len(prices)}")
-    # print(f"DEBUG: run_sim - len(train_X): {len(train_X)}, len(train_P): {len(train_P)}")
-    # print(f"DEBUG: run_sim - len(val_X): {len(val_X)}, len(val_P): {len(val_P)}")
 
     paces = (1, 2, 4, 8, 12)
     input_size = (len(features) * 3 * len(paces)) + 2
@@ -301,7 +296,8 @@ def run_sim():
         else:
             bad_epochs += 1
 
-        world_model.lr = max(1e-5, world_model.lr * 0.98)
+        if bad_epochs > 5:
+            world_model.lr = max(1e-5, world_model.lr * 0.98)
         print(
             f"Epoch {epoch:03d} | LR: {world_model.lr:.2e} | Val P/L: {val_pnl:+.2%} (Smooth: {smoothed_val:+.2%}) (Corr: {avg_corr:+.2%})")
 
