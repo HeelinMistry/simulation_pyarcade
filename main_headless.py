@@ -171,6 +171,15 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
             # trade_duration_before_step = pos_mgr.trade_duration # Removed this line
             pnl, closed_trade_duration = pos_mgr.step(action, prices_param[idx]) # Unpack the returned values
 
+            # Calculate intermediate step reward
+            step_reward = 0.0
+            if pos_mgr.position is not None and idx > 0: # Ensure there's a previous price for calculation
+                if pos_mgr.position == "LONG":
+                    step_reward = (prices_param[idx] - prices_param[idx-1]) / prices_param[idx-1]
+                else: # SHORT position
+                    step_reward = (prices_param[idx-1] - prices_param[idx]) / prices_param[idx-1]
+                step_reward *= 0.1  # small scale, closing reward still dominates
+
             # After pos_mgr.step(), sync executor position so portfolio features are live
             executor.current_side = pos_mgr.position
             executor.inventory = [pos_mgr.entry] if pos_mgr.position is not None else []
@@ -188,7 +197,8 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
                     'action': action,
                     'prev_action': prev_action_for_record,     # ← use saved value
                     'next_state': next_raw_features,
-                    'mcts_probs': mcts_probs
+                    'mcts_probs': mcts_probs,
+                    'step_reward': step_reward # Store the intermediate step reward
                 })
 
             if pnl != 0.0:
@@ -212,14 +222,14 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
                     shaped_reward_centred = shaped_reward # No centering/scaling if not training
 
                 if train:
-                    # Assign 0 reward to all intermediate steps
+                    # Assign step_reward to all intermediate steps
                     for step_data in active_trade_sequence[:-1]:
                         executor.planner.model.record(
                             s=step_data['state'],
                             a=step_data['action'],
                             prev_a=step_data['prev_action'],
                             next_s=step_data['next_state'],
-                            r=0.0, # Intermediate steps get 0 reward
+                            r=step_data['step_reward'], # Use the calculated step_reward
                             target_pi=step_data['mcts_probs']
                         )
                     # Assign shaped_reward_centred only to the last step (the one that closed the trade)
