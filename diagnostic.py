@@ -154,7 +154,7 @@ def plot_visual_diagnostics(model, real_states_np):
     rewards_path = []
     norms_path   = []
     for _ in range(60):
-        test_z, rew = model.simulate_next(test_z, 0.0)
+        test_z, rew = model.simulate_next(test_z, 3) # Changed 0.0 to 3
         rewards_path.append(float(cp.asnumpy(rew).mean()))
         norms_path.append(float(cp.linalg.norm(test_z)))
     ax5.plot(rewards_path, color='purple',  label="Mean hallucinated reward")
@@ -283,7 +283,7 @@ def run_numerical_health_check(model, real_states_np, real_returns_np):
         cp.random.randn(10, INPUT_SIZE).astype(cp.float32))
     mags = [float(cp.linalg.norm(test_z))]
     for _ in range(20):
-        test_z, _ = model.simulate_next(test_z, 0.0)
+        test_z, _ = model.simulate_next(test_z, 3) # Changed 0.0 to 3
         mags.append(float(cp.linalg.norm(test_z)))
     drift = mags[-1] / (mags[0] + 1e-9)
     status = "✅" if 0.5 < drift < 2.0 else "⚠️ "

@@ -61,5 +61,6 @@ class MCTSPlanner:
         return e_x / e_x.sum()
 
     def _action_to_signal(self, action_idx):
-        mapping = {0: 1.0, 1: -1.0, 2: 0.8, 3: 0.0}
-        return mapping[action_idx]
+        # The UnifiedWorldModel.simulate_next now expects integer action indices directly
+        # The mapping to float signals is no longer needed here.
+        return action_idx
