@@ -228,7 +228,7 @@ def plot_visual_diagnostics(model, real_states_np):
     # --- Panel 10: Reward head calibration ---
     ax10 = fig.add_subplot(gs[2, 3])
     test_z  = model.get_initial_state(real_batch)
-    _, pred_r = model.simulate_next(test_z, cp.full((len(real_states_np), 1), 1.0, dtype=cp.float32))
+    _, pred_r = model.simulate_next(test_z, cp.full(len(real_states_np), 3, dtype=cp.int32))
     pred_r_np = cp.asnumpy(pred_r).flatten()
     ax10.scatter(pred_r_np[:200], np.zeros(200), alpha=0.3, s=10, color='purple')
     ax10.axvline(pred_r_np.mean(), color='red', linestyle='--',
@@ -340,7 +340,7 @@ def run_numerical_health_check(model, real_states_np, real_returns_np):
         print(f"  ⚠️  Insufficient data for correlation check")
 
     # ── 7. Reward head calibration ────────────────────────────────────────────
-    _, pred_r = model.simulate_next(latents, cp.full((len(real_states_np), 1), 1.0, dtype=cp.float32))
+    _, pred_r = model.simulate_next(latents, cp.full(len(real_states_np), 3, dtype=cp.int32))
     pred_r_np = cp.asnumpy(pred_r).flatten()
     print(f"\n─── Reward Head Calibration ────────────────────────")
     print(f"  Predicted reward mean: {pred_r_np.mean():.5f}  (want ≈0)")
