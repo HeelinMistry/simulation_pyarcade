@@ -119,7 +119,7 @@ class UnifiedExecutor:
         path, current_s = [], s_latent
         current_hallucinated_price = price
         for _ in range(horizon):
-            next_s, expected_reward = model.simulate_next(current_s, 0.0)
+            next_s, expected_reward = model.simulate_next(current_s, 3)
             current_hallucinated_price *= (
                 1 + float(cp.asnumpy(expected_reward).item())
             )
