@@ -115,7 +115,11 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
     # Default epsilon, can be overridden dynamically below
     default_epsilon = 0.1 if train else 0.0
 
-    while trades_completed < num_trades:
+    # Add step-based timeout
+    total_steps = 0
+    max_steps_per_epoch = num_trades * WALK_DURATION * 2 # Allow for some buffer
+
+    while trades_completed < num_trades and total_steps < max_steps_per_epoch:
         start_idx = np.random.randint(min_start_idx, upper_bound_for_start_idx)
         # print(f"DEBUG: run_stochastic_epoch - start_idx: {start_idx}, upper_bound_for_start_idx: {upper_bound_for_start_idx}")
         executor.aggregator.warm_up_all(indicators_param, start_idx)
@@ -128,6 +132,12 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
 
         for i in range(WALK_DURATION):
             idx = start_idx + i
+            total_steps += 1 # Increment total steps
+
+            # Break if max_steps_per_epoch is reached
+            if total_steps >= max_steps_per_epoch:
+                print(f"WARNING: Reached max_steps_per_epoch ({max_steps_per_epoch}). Breaking inner loop.")
+                break
 
             # Ensure all_indicators is correctly indexed
             if idx >= data_len:
@@ -248,6 +258,10 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
                 executor.current_side = None
                 executor.inventory = []
             if trades_completed >= num_trades: break
+        # Break outer loop if max_steps_per_epoch is reached
+        if total_steps >= max_steps_per_epoch:
+            print(f"WARNING: Reached max_steps_per_epoch ({max_steps_per_epoch}). Breaking outer loop.")
+            break
 
     avg_corr = np.mean(correlation_scores) if correlation_scores else 0
     return total_reward, avg_corr
