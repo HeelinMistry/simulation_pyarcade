@@ -172,13 +172,8 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
             pnl, closed_trade_duration = pos_mgr.step(action, prices_param[idx]) # Unpack the returned values
 
             # Calculate intermediate step reward
+            # Removed the original calculation, now always 0.0
             step_reward = 0.0
-            if pos_mgr.position is not None and idx > 0: # Ensure there's a previous price for calculation
-                if pos_mgr.position == "LONG":
-                    step_reward = (prices_param[idx] - prices_param[idx-1]) / prices_param[idx-1]
-                else: # SHORT position
-                    step_reward = (prices_param[idx-1] - prices_param[idx]) / prices_param[idx-1]
-                step_reward *= 0.1  # small scale, closing reward still dominates
 
             # After pos_mgr.step(), sync executor position so portfolio features are live
             executor.current_side = pos_mgr.position
@@ -198,7 +193,7 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
                     'prev_action': prev_action_for_record,     # ← use saved value
                     'next_state': next_raw_features,
                     'mcts_probs': mcts_probs,
-                    'step_reward': step_reward # Store the intermediate step reward
+                    'step_reward': step_reward # Store the intermediate step reward (now always 0.0)
                 })
 
             if pnl != 0.0:
@@ -229,7 +224,7 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
                             a=step_data['action'],
                             prev_a=step_data['prev_action'],
                             next_s=step_data['next_state'],
-                            r=step_data['step_reward'], # Use the calculated step_reward
+                            r=step_data['step_reward'], # Use the calculated step_reward (now always 0.0)
                             target_pi=step_data['mcts_probs']
                         )
                     # Assign shaped_reward_centred only to the last step (the one that closed the trade)

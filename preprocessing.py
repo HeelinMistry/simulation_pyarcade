@@ -71,6 +71,12 @@ def preprocess_indicators(df):
     # --- OBV (Net Volume Flow Velocity) ---
     obv = (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
     obv_velocity = obv.diff(13)
+    # IMPORTANT: This rolling window of 200 periods is critical for consistency
+    # with model training. If 'df' contains fewer than 200 data points (e.g.,
+    # during live inference with a 'limit=100' fetch), the resulting z-scores
+    # for OBV_Scaled will be NaN or statistically inconsistent with training.
+    # Ensure sufficient historical data (min 200, ideally 250+ for buffer)
+    # is provided to this function during live operation.
     v_mean = obv_velocity.rolling(200).mean()
     v_std = obv_velocity.rolling(200).std() + 1e-9
     df['OBV_Scaled'] = ((obv_velocity - v_mean) / v_std).clip(-3, 3) / 3
@@ -78,6 +84,12 @@ def preprocess_indicators(df):
     # --- NEW: Volatility (ATR-like) ---
     atr_raw = df['Close'].diff().abs().rolling(14).mean()
     atr_pct = atr_raw / df['Close'] * 100
+    # IMPORTANT: This rolling window of 200 periods is critical for consistency
+    # with model training. If 'df' contains fewer than 200 data points (e.g.,
+    # during live inference with a 'limit=100' fetch), the resulting z-scores
+    # for ATR_Scaled will be NaN or statistically inconsistent with training.
+    # Ensure sufficient historical data (min 200, ideally 250+ for buffer)
+    # is provided to this function during live operation.
     atr_mean = atr_pct.rolling(200).mean()
     atr_std  = atr_pct.rolling(200).std() + 1e-9
     df['ATR_Scaled'] = ((atr_pct - atr_mean) / atr_std).clip(-3, 3) / 3
