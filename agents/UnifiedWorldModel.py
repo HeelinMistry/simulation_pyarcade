@@ -7,7 +7,9 @@ import pickle
 
 class UnifiedWorldModel:
     def __init__(self, input_size=92, hidden_size=128, lr=1e-4):
-        self.W_repr = self._init_weights(input_size, hidden_size)
+        self.W_repr1 = self._init_weights(input_size, hidden_size)
+        self.W_repr2 = self._init_weights(hidden_size, hidden_size * 2) # New layer
+        self.W_repr3 = self._init_weights(hidden_size * 2, hidden_size) # New layer
         self.W_dyn_state = self._init_weights(hidden_size + 1, hidden_size)
         self.W_dyn_reward = self._init_weights(hidden_size + 1, 1)
         self.W_pred = self._init_weights(hidden_size, 4 + 1)
@@ -41,7 +43,10 @@ class UnifiedWorldModel:
 
     def get_initial_state(self, x):
         """Inference mode (No Dropout)"""
-        return cp.tanh(cp.asarray(x) @ self.W_repr)
+        # Forward pass through the new representation layers
+        h1 = cp.tanh(cp.asarray(x) @ self.W_repr1)
+        h2 = cp.tanh(h1 @ self.W_repr2)
+        return cp.tanh(h2 @ self.W_repr3)
 
     def simulate_next(self, s, action):
         if s.ndim == 1: s = s.reshape(1, -1)
@@ -95,7 +100,12 @@ class UnifiedWorldModel:
             S_processed = S_processed * mask / (1 - self.dropout_rate) # Apply inverted dropout scaling
             Next_S_processed = Next_S_processed * mask / (1 - self.dropout_rate) # Apply the same mask and scaling to Next_S_processed
         
-        s_latent = cp.tanh(S_processed @ self.W_repr)
+        # Forward pass for representation network
+        h1 = S_processed @ self.W_repr1
+        h1_activated = cp.tanh(h1)
+        h2 = h1_activated @ self.W_repr2
+        h2_activated = cp.tanh(h2)
+        s_latent = cp.tanh(h2_activated @ self.W_repr3)
         
         # Forward
         pred_out = s_latent @ self.W_pred
@@ -107,7 +117,12 @@ class UnifiedWorldModel:
         pred_next_latent = cp.tanh(dyn_input @ self.W_dyn_state)
         pred_reward = dyn_input @ self.W_dyn_reward
         
-        true_next_latent = cp.tanh(Next_S_processed @ self.W_repr) # Note: true_next_latent is derived from masked Next_S_processed
+        # True next latent state calculation
+        true_h1 = Next_S_processed @ self.W_repr1
+        true_h1_activated = cp.tanh(true_h1)
+        true_h2 = true_h1_activated @ self.W_repr2
+        true_h2_activated = cp.tanh(true_h2)
+        true_next_latent = cp.tanh(true_h2_activated @ self.W_repr3)
 
         # --- LOSSES ---
         dZ_policy = (pred_probs - Pi) / self.batch_size
@@ -155,9 +170,24 @@ class UnifiedWorldModel:
             )
             dS_from_dyn[:, :self.hidden_size] += temporal_loss_grad
 
-        dW_repr = S_processed.T @ ((dS_from_pred + dS_from_dyn[:, :self.hidden_size] + (self.latent_lambda * cp.sign(s_latent))) * (1 - s_latent ** 2))
+        # Backpropagate through the representation network
+        dS_from_repr = dS_from_pred + dS_from_dyn[:, :self.hidden_size] + (self.latent_lambda * cp.sign(s_latent))
 
-        for grad in [dW_pred, dW_dyn_state, dW_dyn_reward, dW_repr]: cp.clip(grad, -self.max_grad_norm, self.max_grad_norm, out=grad)
+        # dW_repr3
+        d_h2_activated = dS_from_repr * (1 - s_latent ** 2)
+        dW_repr3 = h2_activated.T @ d_h2_activated
+
+        # dW_repr2
+        d_h2 = d_h2_activated @ self.W_repr3.T
+        d_h1_activated = d_h2 * (1 - h2_activated ** 2)
+        dW_repr2 = h1_activated.T @ d_h1_activated
+
+        # dW_repr1
+        d_h1 = d_h1_activated @ self.W_repr2.T
+        d_S_processed = d_h1 * (1 - h1_activated ** 2)
+        dW_repr1 = S_processed.T @ d_S_processed
+
+        for grad in [dW_pred, dW_dyn_state, dW_dyn_reward, dW_repr1, dW_repr2, dW_repr3]: cp.clip(grad, -self.max_grad_norm, self.max_grad_norm, out=grad)
         
         # --- WEIGHT UPDATES + L1 REGULARIZATION ---
         # INTERVENTION 4.1: Increased L1 for Repr and Pred heads
@@ -168,26 +198,49 @@ class UnifiedWorldModel:
 
         self.W_dyn_state -= self.lr * (dW_dyn_state + self.l1_lambda_dyn * cp.sign(self.W_dyn_state))
         self.W_dyn_reward -= self.lr * (dW_dyn_reward + self.l1_lambda_dyn * cp.sign(self.W_dyn_reward)) # Apply L1 to reward head too
-        self.W_repr -= self.lr * (dW_repr + self.l1_lambda_repr * cp.sign(self.W_repr))
+        
+        # Apply L1 and update for new representation layers
+        self.W_repr1 -= self.lr * (dW_repr1 + self.l1_lambda_repr * cp.sign(self.W_repr1))
+        self.W_repr2 -= self.lr * (dW_repr2 + self.l1_lambda_repr * cp.sign(self.W_repr2))
+        self.W_repr3 -= self.lr * (dW_repr3 + self.l1_lambda_repr * cp.sign(self.W_repr3))
 
         # HARD PROXIMAL PRUNING
         self.W_pred = cp.where(cp.abs(self.W_pred) < self.prune_threshold, 0, self.W_pred)
         self.W_dyn_state = cp.where(cp.abs(self.W_dyn_state) < self.prune_threshold, 0, self.W_dyn_state)
         self.W_dyn_reward = cp.where(cp.abs(self.W_dyn_reward) < self.prune_threshold, 0, self.W_dyn_reward)
-        self.W_repr = cp.where(cp.abs(self.W_repr) < self.prune_threshold, 0, self.W_repr)
+        
+        # Prune new representation layers
+        self.W_repr1 = cp.where(cp.abs(self.W_repr1) < self.prune_threshold, 0, self.W_repr1)
+        self.W_repr2 = cp.where(cp.abs(self.W_repr2) < self.prune_threshold, 0, self.W_repr2)
+        self.W_repr3 = cp.where(cp.abs(self.W_repr3) < self.prune_threshold, 0, self.W_repr3)
 
     def save(self, path="outcomes/best_world_model.pkl"):
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        data = {"W_repr": cp.asnumpy(self.W_repr), "W_dyn_state": cp.asnumpy(self.W_dyn_state), "W_dyn_reward": cp.asnumpy(self.W_dyn_reward), "W_pred": cp.asnumpy(self.W_pred), "input_size": self.W_repr.shape[0], "lr": self.lr}
+        data = {
+            "W_repr1": cp.asnumpy(self.W_repr1),
+            "W_repr2": cp.asnumpy(self.W_repr2),
+            "W_repr3": cp.asnumpy(self.W_repr3),
+            "W_dyn_state": cp.asnumpy(self.W_dyn_state),
+            "W_dyn_reward": cp.asnumpy(self.W_dyn_reward),
+            "W_pred": cp.asnumpy(self.W_pred),
+            "input_size": self.W_repr1.shape[0], # Use W_repr1 for input_size
+            "lr": self.lr
+        }
         with open(path, "wb") as f: pickle.dump(data, f)
 
     def load(self, path="outcomes/best_world_model.pkl"):
         if not os.path.exists(path): return
         with open(path, "rb") as f: data = pickle.load(f)
-        if data.get("input_size", 0) != self.W_repr.shape[0]:
+        if data.get("input_size", 0) != self.W_repr1.shape[0]: # Use W_repr1 for input_size check
             print(f"⚠️  Checkpoint input_size mismatch "
-                  f"(file={data.get('input_size')}, expected={self.W_repr.shape[0]}). "
+                  f"(file={data.get('input_size')}, expected={self.W_repr1.shape[0]}). "
                   f"Load skipped — training from scratch.")
             return
-        self.W_repr, self.W_dyn_state, self.W_dyn_reward, self.W_pred, self.lr = cp.asarray(data["W_repr"]), cp.asarray(data["W_dyn_state"]), cp.asarray(data["W_dyn_reward"]), cp.asarray(data["W_pred"]), data.get("lr", self.lr)
+        self.W_repr1 = cp.asarray(data["W_repr1"])
+        self.W_repr2 = cp.asarray(data["W_repr2"])
+        self.W_repr3 = cp.asarray(data["W_repr3"])
+        self.W_dyn_state = cp.asarray(data["W_dyn_state"])
+        self.W_dyn_reward = cp.asarray(data["W_dyn_reward"])
+        self.W_pred = cp.asarray(data["W_pred"])
+        self.lr = data.get("lr", self.lr)
         print(f"World Model loaded. Resuming at LR: {self.lr:.2e}")

@@ -107,10 +107,10 @@ class UnifiedExecutor:
 
     def predict_trajectory(self, raw_features, price, horizon=15):
         model = self.planner.model
-        assert raw_features.shape[-1] == model.W_repr.shape[0], (
+        assert raw_features.shape[-1] == model.W_repr1.shape[0], (
             f"predict_trajectory received latent vector "
             f"(shape {raw_features.shape[-1]}), "
-            f"expected raw state (shape {model.W_repr.shape[0]})"
+            f"expected raw state (shape {model.W_repr1.shape[0]})"
         )
         s_latent = model.get_initial_state(raw_features)
         probs, _ = model.predict(s_latent)
