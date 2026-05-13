@@ -10,8 +10,8 @@ class UnifiedWorldModel:
         self.W_repr1 = self._init_weights(input_size, hidden_size)
         self.W_repr2 = self._init_weights(hidden_size, hidden_size * 2) # New layer
         self.W_repr3 = self._init_weights(hidden_size * 2, hidden_size) # New layer
-        self.W_dyn_state = self._init_weights(hidden_size + 1, hidden_size)
-        self.W_dyn_reward = self._init_weights(hidden_size + 1, 1)
+        self.W_dyn_state = self._init_weights(hidden_size + 4, hidden_size) # Changed from hidden_size + 1 to hidden_size + 4
+        self.W_dyn_reward = self._init_weights(hidden_size + 4, 1) # Changed from hidden_size + 1 to hidden_size + 4
         self.W_pred = self._init_weights(hidden_size, 4 + 1)
 
         self.lr = lr
@@ -51,9 +51,11 @@ class UnifiedWorldModel:
     def simulate_next(self, s, action):
         if s.ndim == 1: s = s.reshape(1, -1)
         batch_size = s.shape[0]
-        action_arr = cp.asarray(action)
-        action_input = cp.full((batch_size, 1), action_arr, dtype=cp.float32) if action_arr.size == 1 else action_arr.reshape(batch_size, 1)
-        combined = cp.concatenate([s, action_input], axis=1)
+        # Convert scalar action to one-hot encoding
+        action_one_hot = cp.zeros((batch_size, 4), dtype=cp.float32)
+        action_one_hot[cp.arange(batch_size), cp.asarray(action, dtype=cp.int32)] = 1.0
+        
+        combined = cp.concatenate([s, action_one_hot], axis=1)
         
         pred_next_latent = cp.tanh(combined @ self.W_dyn_state)
         pred_reward = combined @ self.W_dyn_reward # Reward head typically doesn't use tanh for direct reward prediction
@@ -84,7 +86,10 @@ class UnifiedWorldModel:
         R, Pi = cp.array(rewards, dtype=cp.float32).reshape(-1, 1), cp.array(target_pis, dtype=cp.float32)
         A_discrete = cp.array(actions, dtype=cp.int32)
         Prev_A_discrete = cp.array(prev_actions, dtype=cp.int32) # New: Previous actions
-        A_continuous = cp.array([1.0, -1.0, 0.8, 0.0], dtype=cp.float32)[A_discrete].reshape(-1, 1)
+        
+        # Convert discrete actions to one-hot encoding for dynamics network
+        A_one_hot = cp.zeros((self.batch_size, 4), dtype=cp.float32)
+        A_one_hot[cp.arange(self.batch_size), A_discrete] = 1.0
 
         # --- INTERVENTION 5: FEATURE ABLATION ---
         S_processed = S
@@ -111,7 +116,7 @@ class UnifiedWorldModel:
         pred_out = s_latent @ self.W_pred
         pred_probs, pred_value = self._softmax(pred_out[:, :4]), pred_out[:, 4:]
         
-        dyn_input = cp.concatenate([s_latent, A_continuous], axis=1)
+        dyn_input = cp.concatenate([s_latent, A_one_hot], axis=1) # Use one-hot encoded actions
         
         # Split dynamics forward pass
         pred_next_latent = cp.tanh(dyn_input @ self.W_dyn_state)
@@ -161,7 +166,7 @@ class UnifiedWorldModel:
         # INTERVENTION 4.2: TEMPORAL CONTRASTIVE LOSS
         # Forces s_latent and pred_next_latent to be close (reduces drift)
         # Only apply contrastive stability for HOLD actions
-        hold_mask = (A_continuous.flatten() == 0.0)
+        hold_mask = (A_discrete == 3) # Action 3 is HOLD
         if hold_mask.any():
             temporal_loss_grad = cp.zeros_like(s_latent)
             temporal_loss_grad[hold_mask] = (
