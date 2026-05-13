@@ -178,12 +178,12 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
                 if mcts_probs[action] < 0.45: action = 3
 
             prev_action_for_record = pos_mgr.last_action      # ← save BEFORE step updates it
-            # trade_duration_before_step = pos_mgr.trade_duration # Removed this line
             pnl, closed_trade_duration = pos_mgr.step(action, prices_param[idx]) # Unpack the returned values
 
             # Calculate intermediate step reward
-            # Removed the original calculation, now always 0.0
-            step_reward = 0.0
+            # If a trade was just closed, the step_reward for this step should reflect that PNL.
+            # Otherwise, it's 0.0 (for holding or opening a new trade).
+            step_reward = shape_reward(pnl, closed_trade_duration) if pnl != 0.0 else 0.0
 
             # After pos_mgr.step(), sync executor position so portfolio features are live
             executor.current_side = pos_mgr.position
@@ -200,10 +200,10 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
                 active_trade_sequence.append({
                     'state': current_raw_features,
                     'action': action,
-                    'prev_action': prev_action_for_record,     # ← use saved value
+                    'prev_action': prev_action_for_record,
                     'next_state': next_raw_features,
                     'mcts_probs': mcts_probs,
-                    'step_reward': step_reward # Store the intermediate step reward (now always 0.0)
+                    'step_reward': step_reward # Store the intermediate step reward
                 })
 
             if pnl != 0.0:
@@ -234,7 +234,7 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
                             a=step_data['action'],
                             prev_a=step_data['prev_action'],
                             next_s=step_data['next_state'],
-                            r=step_data['step_reward'], # Use the calculated step_reward (now always 0.0)
+                            r=step_data['step_reward'], # Use the calculated step_reward
                             target_pi=step_data['mcts_probs']
                         )
                     # Assign shaped_reward_centred only to the last step (the one that closed the trade)
