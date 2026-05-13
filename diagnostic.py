@@ -41,7 +41,7 @@ def load_real_data():
     92-d state.  We build real 92-d states inside the checks using the
     StateAggregator so results match exactly what training sees."""
     if not os.path.exists(MASTER_CSV):
-        raise FileNotFoundError(f"❌ Master CSV not found at {MASTER_CSV}")
+        raise FileNotFoundError(f"❌ Master CSV not found at {MODEL_PATH}")
     df = pd.read_csv(MASTER_CSV)
     ind = df[FEATURES].values.astype(np.float32)
     prices = df["Close"].values.astype(np.float32)
@@ -97,20 +97,26 @@ def build_real_states(indicators, prices, n=SAMPLE_N):
 # 2. Visual diagnostic panels (existing + extended)
 # ─────────────────────────────────────────────
 def plot_visual_diagnostics(model, real_states_np):
-    w_repr     = cp.asnumpy(model.W_repr)
+    w_repr1    = cp.asnumpy(model.W_repr1)
+    w_repr2    = cp.asnumpy(model.W_repr2)
+    w_repr3    = cp.asnumpy(model.W_repr3)
     w_dyn_state  = cp.asnumpy(model.W_dyn_state)
     w_dyn_reward = cp.asnumpy(model.W_dyn_reward)
     w_dyn      = np.concatenate([w_dyn_state, w_dyn_reward], axis=1)
     w_pred     = cp.asnumpy(model.W_pred)
 
+    # Calculate end-to-end sensitivity for the representation network
+    # This approximates the Jacobian by chaining absolute weight matrices
+    end_to_end_repr_sensitivity = np.abs(w_repr1) @ np.abs(w_repr2) @ np.abs(w_repr3)
+
     fig = plt.figure(figsize=(28, 20))
     gs  = gridspec.GridSpec(3, 4, figure=fig, hspace=0.42, wspace=0.35)
 
-    # --- Panel 1: Repr heatmap ---
+    # --- Panel 1: Repr heatmap (end-to-end sensitivity) ---
     ax1 = fig.add_subplot(gs[0, 0])
-    im1 = ax1.imshow(w_repr, aspect='auto', cmap='magma')
-    ax1.set_title("Repr Sensitivity")
-    ax1.set_xlabel("Hidden unit")
+    im1 = ax1.imshow(end_to_end_repr_sensitivity, aspect='auto', cmap='magma')
+    ax1.set_title("Repr End-to-End Sensitivity")
+    ax1.set_xlabel("Final latent unit")
     ax1.set_ylabel("Input feature")
     fig.colorbar(im1, ax=ax1, shrink=0.8)
 
@@ -132,7 +138,9 @@ def plot_visual_diagnostics(model, real_states_np):
 
     # --- Panel 4: Weight distributions ---
     ax4 = fig.add_subplot(gs[0, 3])
-    ax4.hist(w_repr.flatten(),      bins=120, alpha=0.5, label="Repr",      color='royalblue')
+    ax4.hist(w_repr1.flatten(),     bins=120, alpha=0.5, label="Repr1",     color='darkblue')
+    ax4.hist(w_repr2.flatten(),     bins=120, alpha=0.5, label="Repr2",     color='royalblue')
+    ax4.hist(w_repr3.flatten(),     bins=120, alpha=0.5, label="Repr3",     color='lightsteelblue')
     ax4.hist(w_dyn_state.flatten(), bins=120, alpha=0.5, label="Dyn_State", color='tomato')
     ax4.hist(w_dyn_reward.flatten(),bins=120, alpha=0.5, label="Dyn_Reward",color='gold')
     ax4.set_title("Weight Distributions (Sparsity)")
@@ -181,7 +189,8 @@ def plot_visual_diagnostics(model, real_states_np):
 
     # --- Panel 8: Per-pace sensitivity heatmap ---
     ax8 = fig.add_subplot(gs[2, :2])
-    sensitivities = np.sum(np.abs(w_repr), axis=1)
+    # Sum the end-to-end sensitivities across the final latent units for each input feature
+    sensitivities = np.sum(end_to_end_repr_sensitivity, axis=1)
     ind_names = ["RSI", "MACD", "BB", "OBV", "ATR", "MeanDev"]
     pace_labels = [f"pace={p}" for p in PACES]
     grid = np.zeros((NUM_IND, len(PACES)))
@@ -240,7 +249,9 @@ def plot_visual_diagnostics(model, real_states_np):
 # 3. Numerical health check (extended)
 # ─────────────────────────────────────────────
 def run_numerical_health_check(model, real_states_np, real_returns_np):
-    w_repr      = cp.asnumpy(model.W_repr)
+    w_repr1     = cp.asnumpy(model.W_repr1)
+    w_repr2     = cp.asnumpy(model.W_repr2)
+    w_repr3     = cp.asnumpy(model.W_repr3)
     w_dyn_state = cp.asnumpy(model.W_dyn_state)
     w_dyn_reward= cp.asnumpy(model.W_dyn_reward)
     w_pred      = cp.asnumpy(model.W_pred)
@@ -251,13 +262,18 @@ def run_numerical_health_check(model, real_states_np, real_returns_np):
     probs_np    = cp.asnumpy(probs_cp)
     values_np   = cp.asnumpy(values_cp).flatten()
 
+    # Calculate end-to-end sensitivity for the representation network
+    end_to_end_repr_sensitivity = np.abs(w_repr1) @ np.abs(w_repr2) @ np.abs(w_repr3)
+
     # ── 1. Sparsity ──────────────────────────────────────────────────────────
     get_sparse = lambda w: np.sum(np.abs(w) < 1e-5) / w.size
     print("\n══════════════════════════════════════════════════")
     print("   🩺  WORLD MODEL HEALTH & BIAS CHECK")
     print("══════════════════════════════════════════════════")
     print(f"\n─── Weight Sparsity ───────────────────────────────")
-    print(f"  Repr      : {get_sparse(w_repr):.1%}  (target 10-40%)")
+    print(f"  Repr1     : {get_sparse(w_repr1):.1%}  (target 10-40%)")
+    print(f"  Repr2     : {get_sparse(w_repr2):.1%}  (target 10-40%)")
+    print(f"  Repr3     : {get_sparse(w_repr3):.1%}  (target 10-40%)")
     print(f"  Dyn_State : {get_sparse(w_dyn_state):.1%}  (target 10-40%)")
     print(f"  Dyn_Reward: {get_sparse(w_dyn_reward):.1%}  (target 10-40%)")
     print(f"  Pred      : {get_sparse(w_pred):.1%}  (target 20-50%)")
@@ -358,7 +374,8 @@ def run_numerical_health_check(model, real_states_np, real_returns_np):
         print(f"  {name:<8}  {mcts_dist[i]:>6.1%}  {raw_dist[i]:>6.1%}")
 
     # ── 9. Per-pace sensitivity breakdown ────────────────────────────────────
-    sensitivities = np.sum(np.abs(w_repr), axis=1)
+    # Sum the end-to-end sensitivities across the final latent units for each input feature
+    sensitivities = np.sum(end_to_end_repr_sensitivity, axis=1)
     ind_names     = ["RSI", "MACD", "BB", "OBV", "ATR", "MeanDev"]
     pace_values   = list(PACES)
     print(f"\n─── Per-Pace Feature Sensitivity ───────────────────")
