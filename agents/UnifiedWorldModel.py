@@ -124,7 +124,12 @@ class UnifiedWorldModel:
         action_repeat_penalty[cp.arange(self.batch_size)[repeat_mask], A_discrete[repeat_mask]] = self.action_penalty_lambda
         dZ_policy += action_repeat_penalty / self.batch_size
 
-        dZ_value = (pred_value - R) / self.batch_size
+        # Bootstrap value target: r_t + gamma * V(s_{t+1})
+        # with cp.no_grad(): # CuPy does not have a no_grad context manager
+        _, next_values = self.predict(self.get_initial_state(Next_S_processed))
+        td_target = R + 0.90 * next_values  # gamma=0.90 matches MCTSPlanner
+        dZ_value = (pred_value - td_target) / self.batch_size
+
         dZ_pred = cp.concatenate([dZ_policy, dZ_value], axis=1)
         
         dW_pred, dS_from_pred = s_latent.T @ dZ_pred, dZ_pred @ self.W_pred.T
