@@ -140,9 +140,15 @@ class UnifiedWorldModel:
 
         # INTERVENTION 4.2: TEMPORAL CONTRASTIVE LOSS
         # Forces s_latent and pred_next_latent to be close (reduces drift)
-        temporal_loss_grad = (s_latent - pred_next_latent) * self.temporal_contrastive_lambda
-        # Fix: Only add temporal_loss_grad to the state portion of dS_from_dyn
-        dS_from_dyn[:, :self.hidden_size] += temporal_loss_grad # Add to gradient flowing back to s_latent from dynamics
+        # Only apply contrastive stability for HOLD actions
+        hold_mask = (A_continuous.flatten() == 0.0)
+        if hold_mask.any():
+            temporal_loss_grad = cp.zeros_like(s_latent)
+            temporal_loss_grad[hold_mask] = (
+                (s_latent[hold_mask] - pred_next_latent[hold_mask]) 
+                * self.temporal_contrastive_lambda
+            )
+            dS_from_dyn[:, :self.hidden_size] += temporal_loss_grad
 
         dW_repr = S_processed.T @ ((dS_from_pred + dS_from_dyn[:, :self.hidden_size] + (self.latent_lambda * cp.sign(s_latent))) * (1 - s_latent ** 2))
 

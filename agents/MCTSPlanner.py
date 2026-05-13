@@ -1,5 +1,6 @@
 import cupy as cp
 import random # For epsilon-greedy
+import numpy as np # Added for stochastic rollouts
 
 
 class MCTSPlanner:
@@ -28,7 +29,9 @@ class MCTSPlanner:
                     best_future_action = random.randrange(4)
                 else:
                     probs, _ = self.model.predict(current_s)
-                    best_future_action = int(cp.argmax(probs))
+                    # Sample from policy instead of taking argmax
+                    probs_np = cp.asnumpy(probs[0])
+                    best_future_action = int(np.random.choice(4, p=probs_np))
                 
                 future_sig = self._action_to_signal(best_future_action)
                 current_s, expected_r = self.model.simulate_next(current_s, future_sig)
