@@ -270,7 +270,7 @@ def run_sim():
     if os.path.exists("outcomes/best_world_model.pkl"):
         world_model.load("outcomes/best_world_model.pkl")
 
-    planner = MCTSPlanner(world_model, lookahead_depth=10)
+    planner = MCTSPlanner(world_model, lookahead_depth=10, c_puct=1.0)
     executor = UnifiedExecutor(name="MainExecutor", planner=planner, paces=paces)
 
     best_val = -np.inf
