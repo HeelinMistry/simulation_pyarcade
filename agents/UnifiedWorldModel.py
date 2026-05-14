@@ -30,6 +30,7 @@ class UnifiedWorldModel:
         self.l1_lambda_dyn = 5e-4  # INCREASED to clean up the Hallucination Engine
         self.latent_lambda = 5e-3  # Increased latent sparsity
         self.temporal_contrastive_lambda = 0.01 # New: Forces z_t and predicted z_t+1 to be close
+        self.temporal_contrastive_lambda_non_hold = 0.001 # New: Lower lambda for non-HOLD transitions
 
         self.prune_threshold = 4.5e-3 # INCREASED: Shaving more 'average' noise
         self.dropout_rate = 0.20   # INCREASED: Forces model to find "Alpha Leaders"
@@ -165,15 +166,25 @@ class UnifiedWorldModel:
 
         # INTERVENTION 4.2: TEMPORAL CONTRASTIVE LOSS
         # Forces s_latent and pred_next_latent to be close (reduces drift)
-        # Only apply contrastive stability for HOLD actions
+        temporal_loss_grad = cp.zeros_like(s_latent)
+        
+        # Apply stronger lambda for HOLD actions
         hold_mask = (A_discrete == 3) # Action 3 is HOLD
         if hold_mask.any():
-            temporal_loss_grad = cp.zeros_like(s_latent)
             temporal_loss_grad[hold_mask] = (
                 (s_latent[hold_mask] - pred_next_latent[hold_mask]) 
                 * self.temporal_contrastive_lambda
             )
-            dS_from_dyn[:, :self.hidden_size] += temporal_loss_grad
+        
+        # Apply weaker lambda for non-HOLD actions
+        non_hold_mask = (A_discrete != 3)
+        if non_hold_mask.any():
+            temporal_loss_grad[non_hold_mask] = (
+                (s_latent[non_hold_mask] - pred_next_latent[non_hold_mask]) 
+                * self.temporal_contrastive_lambda_non_hold
+            )
+        
+        dS_from_dyn[:, :self.hidden_size] += temporal_loss_grad
 
         # Backpropagate through the representation network
         dS_from_repr = dS_from_pred + dS_from_dyn[:, :self.hidden_size] + (self.latent_lambda * cp.sign(s_latent))
