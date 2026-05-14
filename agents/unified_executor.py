@@ -1,5 +1,6 @@
 import numpy as np
 import cupy as cp
+import collections
 from agents.state_aggregator import StateAggregator
 
 # Matches PositionManager commission used during training
@@ -11,7 +12,7 @@ class UnifiedExecutor:
         self.name = name
         self.planner = planner
         self.aggregator = StateAggregator(paces)
-        self.inventory = []
+        self.inventory = collections.deque(maxlen=100)
         self.current_side = None
         self.total_reward = 0.0
         self.last_probs = np.array([0.0, 0.0, 0.0, 1.0])
@@ -65,12 +66,12 @@ class UnifiedExecutor:
         if action == 0 and self.current_side != "LONG":
             if self.current_side == "SHORT":
                 trade_reward = self._close_position(price)
-            self.inventory = [price * (1 + COMMISSION)]  # entry with commission
+            self.inventory.append(price * (1 + COMMISSION))  # entry with commission
             self.current_side = "LONG"
         elif action == 1 and self.current_side != "SHORT":
             if self.current_side == "LONG":
                 trade_reward = self._close_position(price)
-            self.inventory = [price * (1 - COMMISSION)]  # entry with commission
+            self.inventory.append(price * (1 - COMMISSION))  # entry with commission
             self.current_side = "SHORT"
         elif action == 2 and self.current_side is not None:
             trade_reward = self._close_position(price)
@@ -86,7 +87,7 @@ class UnifiedExecutor:
         """
         if not self.inventory:
             return 0.0
-        entry = self.inventory.pop(0)
+        entry = self.inventory.popleft()
         if self.current_side == "LONG":
             exit_price = price * (1 - COMMISSION)
             reward = (exit_price - entry) / entry
