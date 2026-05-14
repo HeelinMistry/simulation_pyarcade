@@ -1,5 +1,6 @@
 import numpy as np
 import os
+import collections # Import collections
 
 from agents.UnifiedWorldModel import UnifiedWorldModel
 from agents.MCTSPlanner import MCTSPlanner
@@ -125,7 +126,7 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
         executor.aggregator.warm_up_all(indicators_param, start_idx)
         executor.current_side = None
         executor.inventory = []
-        active_trade_sequence = []
+        active_trade_sequence = collections.deque(maxlen=100) # Use deque with maxlen
 
         # Initialize next_raw_features for the first iteration
         next_raw_features = executor.get_state(indicators_param[start_idx], prices_param[start_idx])
@@ -197,9 +198,7 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
             next_raw_features = executor.get_state(indicators_param[next_idx], prices_param[next_idx])
 
             if train:
-                # Cap active_trade_sequence at ~100 entries (rolling window)
-                if len(active_trade_sequence) >= 100:
-                    active_trade_sequence.pop(0)
+                # active_trade_sequence is now a deque with maxlen, so no manual pop(0) needed
                 active_trade_sequence.append({
                     'state': current_raw_features,
                     'action': action,
@@ -254,7 +253,7 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
 
                 total_reward += pnl
                 trades_completed += 1
-                active_trade_sequence = []
+                active_trade_sequence.clear() # Clear the deque after a trade is completed
                 pos_mgr.reset()
 
                 # Re-sync executor to match pos_mgr flat state after reset
