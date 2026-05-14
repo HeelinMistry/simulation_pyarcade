@@ -219,19 +219,11 @@ def run_live(symbol: str = "XRP"):
         log.info(f"   next candle in {wait:.0f}s  ({wait/60:.1f} min)")
         time.sleep(wait)
 
-        # Fetch latest closed candle (limit=2 → [prev_closed, forming]; we take [0])
-        raw = get_candles(symbol, limit=2)
-        if raw is None or len(raw) == 0:
-            log.warning("⚠️  Failed to fetch latest candle — skipping tick.")
-            continue
-
-        candle = raw.iloc[-1]  # Most recent CLOSED candle
-
         # Preprocess: need a small DataFrame for rolling indicators
         # We append the new candle to recent history for accurate indicator calc
         recent_raw = get_candles(symbol, limit=300)
         if recent_raw is None:
-            log.warning("⚠️  Failed to fetch recent candles for indicator calc — skipping.")
+            log.warning("⚠️  Failed to fetch recent candles for indicator calc — skipping tick.")
             continue
 
         processed = preprocess_indicators(recent_raw)

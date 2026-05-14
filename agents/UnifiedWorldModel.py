@@ -102,9 +102,11 @@ class UnifiedWorldModel:
 
         # --- FEATURE DROPOUT (Specialization Trigger) ---
         if self.dropout_rate > 0:
-            mask = cp.random.choice([0.0, 1.0], size=S_processed.shape, p=[self.dropout_rate, 1-self.dropout_rate])
-            S_processed = S_processed * mask / (1 - self.dropout_rate) # Apply inverted dropout scaling
-            Next_S_processed = Next_S_processed * mask / (1 - self.dropout_rate) # Apply the same mask and scaling to Next_S_processed
+            mask_s = cp.random.choice([0.0, 1.0], size=S_processed.shape, p=[self.dropout_rate, 1-self.dropout_rate])
+            S_processed = S_processed * mask_s / (1 - self.dropout_rate) # Apply inverted dropout scaling
+            
+            mask_next_s = cp.random.choice([0.0, 1.0], size=Next_S_processed.shape, p=[self.dropout_rate, 1-self.dropout_rate])
+            Next_S_processed = Next_S_processed * mask_next_s / (1 - self.dropout_rate) # Apply a new mask and scaling to Next_S_processed
         
         # Forward pass for representation network
         h1 = S_processed @ self.W_repr1
