@@ -230,7 +230,7 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
 
                 if train:
                     # Assign step_reward to all intermediate steps
-                    for step_data in active_trade_sequence[:-1]:
+                    for step_data in list(active_trade_sequence)[:-1]: # Convert deque to list for slicing
                         executor.planner.model.record(
                             s=step_data['state'],
                             a=step_data['action'],
