@@ -27,6 +27,7 @@ import requests
 import numpy as np
 import pandas as pd
 from datetime import datetime, timezone
+from collections import deque # Import deque
 
 from agents.MCTSPlanner import MCTSPlanner
 from agents.UnifiedWorldModel import UnifiedWorldModel
@@ -122,7 +123,7 @@ class TradeLog:
         """Persist current position so a restart can warn the operator."""
         state = {
             "current_side": executor.current_side,
-            "inventory":    executor.inventory,
+            "inventory":    list(executor.inventory), # Convert deque to list
             "total_reward": executor.total_reward,
             "saved_at":     datetime.now(timezone.utc).isoformat()
         }
@@ -183,7 +184,8 @@ def run_live(symbol: str = "XRP"):
             f"Restoring executor state."
         )
         executor.current_side = prior_state["current_side"]
-        executor.inventory    = prior_state["inventory"]
+        # Convert list back to deque with maxlen=100
+        executor.inventory    = deque(prior_state["inventory"], maxlen=100)
         executor.total_reward = prior_state["total_reward"]
 
     # ── 3. Warm-up: fetch history and fully populate aggregator ──
