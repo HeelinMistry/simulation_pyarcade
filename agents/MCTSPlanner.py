@@ -4,10 +4,10 @@ import numpy as np # Added for stochastic rollouts
 
 
 class MCTSPlanner:
-    def __init__(self, world_model, lookahead_depth=10, c_puct=1.0): # INTERVENTION 2.1: Rollout Truncation
+    def __init__(self, world_model, lookahead_depth=50, c_puct=1.0): # INTERVENTION 2.1: Rollout Truncation
         self.model = world_model
         self.depth = lookahead_depth
-        self.gamma = 0.90  # INTERVENTION 2.2: Reduced Gamma for Loss Weighting
+        self.gamma = 0.99  # INTERVENTION 2.2: Reduced Gamma for Loss Weighting
         self.c_puct = c_puct # New parameter for PUCT-style bonus
 
     def search_best_action(self, raw_features, temp=0.05, epsilon=0.0): # INTERVENTION 1.3: Epsilon-greedy
