@@ -156,13 +156,16 @@ def run_stochastic_epoch(executor, indicators_param, prices_param, num_trades=15
 
             current_epsilon = default_epsilon
             if train:
-                # Symmetry check for LONG starvation
+                # Symmetry check for LONG/SHORT starvation and exploration boost
                 recent = list(executor.planner.model.memory)[-50:]
-                # Assuming action 1 is SHORT based on PositionManager
-                # The 'a' (action) is the second element in the tuple recorded in memory (index 1)
+                # Assuming action 1 is SHORT and action 0 is LONG based on PositionManager
                 short_rate = sum(1 for x in recent if x[1] == 1) / max(len(recent), 1)
+                long_rate = sum(1 for x in recent if x[1] == 0) / max(len(recent), 1)
+
                 if short_rate > 0.70:
-                    current_epsilon = 0.5 # Force LONG exploration
+                    current_epsilon = 0.5 # Force LONG exploration to counter short bias
+                elif long_rate > 0.70:
+                    current_epsilon = 0.5 # Force SHORT exploration to counter long bias
                 else:
                     current_epsilon = 0.1 # Revert to default exploration
             else:
