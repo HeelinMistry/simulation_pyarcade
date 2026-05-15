@@ -280,7 +280,7 @@ class UnifiedWorldModel:
         self.W_repr3 = cp.asarray(data["W_repr3"])
         self.W_dyn_state = cp.asarray(data["W_dyn_state"])
         self.W_dyn_reward = cp.asarray(data["W_dyn_reward"])
-        self.W_policy = cp.asarray(data["W_policy"]) # Load W_policy
-        self.W_value = cp.asarray(data["W_value"])   # Load W_value
+        self.W_policy = cp.asarray(data.get("W_policy", self.W_policy)) # Load W_policy, with fallback
+        self.W_value = cp.asarray(data.get("W_value", self.W_value))   # Load W_value, with fallback
         self.lr = data.get("lr", self.lr)
         print(f"World Model loaded. Resuming at LR: {self.lr:.2e}")
