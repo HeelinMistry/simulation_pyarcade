@@ -21,7 +21,8 @@ class UnifiedWorldModel:
         
         # --- INTERVENTION 1: POLICY COLLAPSE FIX ---
         self.entropy_beta = 0.02  # Changed to positive to ADD entropy bonus (target > 1.5 bits)
-        self.action_penalty_lambda = 0.01 # New: Penalty for repeating same action
+        self.action_penalty_lambda = 0.07 # New: Penalty for repeating same action, increased and will be asymmetric
+        self.short_repeat_penalty_multiplier = 2.5 # Heavier penalty for repeated SHORT
 
         # --- INTERVENTION 4: AGGRESSIVE SPARSITY & BOTTLENECKING ---
         self.l1_lambda_repr = 8e-4 # INCREASED to force Repr Sparsity > 10%
@@ -38,6 +39,9 @@ class UnifiedWorldModel:
 
         # --- INTERVENTION 5: DIAGNOSTIC ABLATION ---
         self.feature_ablation_mask = None # Mask to zero-out specific features
+
+        # --- KL Divergence Regularization ---
+        self.kl_penalty_lambda = 0.02 # Lambda for uniform prior KL divergence
 
     def _init_weights(self, i, o):
         return cp.random.randn(i, o) * cp.sqrt(2.0 / i)
@@ -142,10 +146,22 @@ class UnifiedWorldModel:
 
         # INTERVENTION 1.1: ACTION PENALTY (for repeating same action)
         # Discourage mode locking by penalizing if current action == previous action
-        repeat_mask = (A_discrete == Prev_A_discrete) & ((A_discrete == 0) | (A_discrete == 1))
         action_repeat_penalty = cp.zeros_like(pred_probs)
-        action_repeat_penalty[cp.arange(self.batch_size)[repeat_mask], A_discrete[repeat_mask]] = self.action_penalty_lambda
+        
+        # Apply base penalty for repeating LONG or SHORT
+        repeat_long_mask = (A_discrete == Prev_A_discrete) & (A_discrete == 0) # LONG
+        action_repeat_penalty[cp.arange(self.batch_size)[repeat_long_mask], A_discrete[repeat_long_mask]] = self.action_penalty_lambda
+        
+        # Apply heavier penalty for repeating SHORT
+        repeat_short_mask = (A_discrete == Prev_A_discrete) & (A_discrete == 1) # SHORT
+        action_repeat_penalty[cp.arange(self.batch_size)[repeat_short_mask], A_discrete[repeat_short_mask]] = self.action_penalty_lambda * self.short_repeat_penalty_multiplier
+        
         dZ_policy += action_repeat_penalty / self.batch_size
+
+        # KL Divergence Regularization
+        uniform_prior = cp.full_like(pred_probs, 0.25)
+        kl_grad = (pred_probs - uniform_prior) * self.kl_penalty_lambda
+        dZ_policy += kl_grad / self.batch_size
 
         # Bootstrap value target: r_t + gamma * V(s_{t+1})
         # with cp.no_grad(): # CuPy does not have a no_grad context manager
