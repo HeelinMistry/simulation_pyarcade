@@ -12,9 +12,11 @@ class UnifiedWorldModel:
         self.W_repr3 = self._init_weights(hidden_size * 2, hidden_size) # New layer
         self.W_dyn_state = self._init_weights(hidden_size + 4, hidden_size) # Changed from hidden_size + 1 to hidden_size + 4
         self.W_dyn_reward = self._init_weights(hidden_size + 4, 1) # Changed from hidden_size + 1 to hidden_size + 4
-        self.W_pred = self._init_weights(hidden_size, 4 + 1)
+        self.W_policy = self._init_weights(hidden_size, 4) # Policy head
+        self.W_value = self._init_weights(hidden_size, 1) # Value head
 
         self.lr = lr
+        self.lr_value = lr * 3 # Higher learning rate for value head
         self.memory = deque(maxlen=20000)
         self.batch_size = 64
         self.hidden_size = hidden_size # Store hidden_size for later use
@@ -26,8 +28,8 @@ class UnifiedWorldModel:
 
         # --- INTERVENTION 4: AGGRESSIVE SPARSITY & BOTTLENECKING ---
         self.l1_lambda_repr = 8e-4 # INCREASED to force Repr Sparsity > 10%
-        self.l1_lambda_pred = 5e-4 # Increased L1 for Prediction head (target 20-40% sparsity)
-        self.l1_lambda_value = 1e-4 # New: Lower L1 for value head to prevent aggressive pruning
+        self.l1_lambda_policy = 5e-4 # Increased L1 for Policy head (target 20-40% sparsity)
+        self.l1_lambda_value = 0.0 # New: Lower L1 for value head to prevent aggressive pruning (set to 0 as requested)
         self.l1_lambda_dyn = 5e-4  # INCREASED to clean up the Hallucination Engine
         self.latent_lambda = 5e-3  # Increased latent sparsity
         self.temporal_contrastive_lambda = 0.01 # New: Forces z_t and predicted z_t+1 to be close
@@ -69,8 +71,10 @@ class UnifiedWorldModel:
 
     def predict(self, s):
         if s.ndim == 1: s = s.reshape(1, -1)
-        out = s @ self.W_pred
-        return self._softmax(out[:, :4]), out[:, 4:]
+        # Separate policy and value predictions
+        policy_out = s @ self.W_policy
+        value_out = s @ self.W_value
+        return self._softmax(policy_out), value_out
 
     def _softmax(self, z):
         if z.ndim == 1: z = z.reshape(1, -1)
@@ -119,9 +123,9 @@ class UnifiedWorldModel:
         h2_activated = cp.tanh(h2)
         s_latent = cp.tanh(h2_activated @ self.W_repr3)
         
-        # Forward
-        pred_out = s_latent @ self.W_pred
-        pred_probs, pred_value = self._softmax(pred_out[:, :4]), pred_out[:, 4:]
+        # Forward for policy and value heads
+        pred_probs = self._softmax(s_latent @ self.W_policy)
+        pred_value = s_latent @ self.W_value
         
         dyn_input = cp.concatenate([s_latent, A_one_hot], axis=1) # Use one-hot encoded actions
         
@@ -168,10 +172,10 @@ class UnifiedWorldModel:
         _, next_values = self.predict(self.get_initial_state(Next_S_processed))
         td_target = R + 0.90 * next_values  # gamma=0.90 matches MCTSPlanner
         dZ_value = (pred_value - td_target) / self.batch_size
-
-        dZ_pred = cp.concatenate([dZ_policy, dZ_value], axis=1)
         
-        dW_pred, dS_from_pred = s_latent.T @ dZ_pred, dZ_pred @ self.W_pred.T
+        # Gradients for policy and value heads
+        dW_policy, dS_from_policy = s_latent.T @ dZ_policy, dZ_policy @ self.W_policy.T
+        dW_value, dS_from_value = s_latent.T @ dZ_value, dZ_value @ self.W_value.T
 
         # Split dynamics backward pass
         dZ_pred_next_latent = (pred_next_latent - true_next_latent) / self.batch_size * (1 - pred_next_latent ** 2) # Apply tanh derivative
@@ -205,7 +209,8 @@ class UnifiedWorldModel:
         dS_from_dyn[:, :self.hidden_size] += temporal_loss_grad
 
         # Backpropagate through the representation network
-        dS_from_repr = dS_from_pred + dS_from_dyn[:, :self.hidden_size] + (self.latent_lambda * cp.sign(s_latent))
+        dS_from_pred_combined = dS_from_policy + dS_from_value # Combine gradients from policy and value heads
+        dS_from_repr = dS_from_pred_combined + dS_from_dyn[:, :self.hidden_size] + (self.latent_lambda * cp.sign(s_latent))
 
         # dW_repr3
         d_h2_activated = dS_from_repr * (1 - s_latent ** 2)
@@ -221,14 +226,12 @@ class UnifiedWorldModel:
         d_S_processed = d_h1 * (1 - h1_activated ** 2)
         dW_repr1 = S_processed.T @ d_S_processed
 
-        for grad in [dW_pred, dW_dyn_state, dW_dyn_reward, dW_repr1, dW_repr2, dW_repr3]: cp.clip(grad, -self.max_grad_norm, self.max_grad_norm, out=grad)
+        for grad in [dW_policy, dW_value, dW_dyn_state, dW_dyn_reward, dW_repr1, dW_repr2, dW_repr3]: cp.clip(grad, -self.max_grad_norm, self.max_grad_norm, out=grad)
         
         # --- WEIGHT UPDATES + L1 REGULARIZATION ---
-        # INTERVENTION 4.1: Increased L1 for Repr and Pred heads
-        # Apply different L1 regularization to policy and value heads
-        l1_policy_term = self.l1_lambda_pred * cp.sign(self.W_pred[:, :4])
-        l1_value_term = self.l1_lambda_value * cp.sign(self.W_pred[:, 4:])
-        self.W_pred -= self.lr * (dW_pred + cp.concatenate([l1_policy_term, l1_value_term], axis=1))
+        # Update policy and value heads separately
+        self.W_policy -= self.lr * (dW_policy + self.l1_lambda_policy * cp.sign(self.W_policy))
+        self.W_value -= self.lr_value * (dW_value + self.l1_lambda_value * cp.sign(self.W_value)) # Use lr_value and l1_lambda_value
 
         self.W_dyn_state -= self.lr * (dW_dyn_state + self.l1_lambda_dyn * cp.sign(self.W_dyn_state))
         self.W_dyn_reward -= self.lr * (dW_dyn_reward + self.l1_lambda_dyn * cp.sign(self.W_dyn_reward)) # Apply L1 to reward head too
@@ -239,7 +242,8 @@ class UnifiedWorldModel:
         self.W_repr3 -= self.lr * (dW_repr3 + self.l1_lambda_repr * cp.sign(self.W_repr3))
 
         # HARD PROXIMAL PRUNING
-        self.W_pred = cp.where(cp.abs(self.W_pred) < self.prune_threshold, 0, self.W_pred)
+        self.W_policy = cp.where(cp.abs(self.W_policy) < self.prune_threshold, 0, self.W_policy)
+        self.W_value = cp.where(cp.abs(self.W_value) < self.prune_threshold, 0, self.W_value) # Prune value head
         self.W_dyn_state = cp.where(cp.abs(self.W_dyn_state) < self.prune_threshold, 0, self.W_dyn_state)
         self.W_dyn_reward = cp.where(cp.abs(self.W_dyn_reward) < self.prune_threshold, 0, self.W_dyn_reward)
         
@@ -256,7 +260,8 @@ class UnifiedWorldModel:
             "W_repr3": cp.asnumpy(self.W_repr3),
             "W_dyn_state": cp.asnumpy(self.W_dyn_state),
             "W_dyn_reward": cp.asnumpy(self.W_dyn_reward),
-            "W_pred": cp.asnumpy(self.W_pred),
+            "W_policy": cp.asnumpy(self.W_policy), # Save W_policy
+            "W_value": cp.asnumpy(self.W_value),   # Save W_value
             "input_size": self.W_repr1.shape[0], # Use W_repr1 for input_size
             "lr": self.lr
         }
@@ -275,6 +280,7 @@ class UnifiedWorldModel:
         self.W_repr3 = cp.asarray(data["W_repr3"])
         self.W_dyn_state = cp.asarray(data["W_dyn_state"])
         self.W_dyn_reward = cp.asarray(data["W_dyn_reward"])
-        self.W_pred = cp.asarray(data["W_pred"])
+        self.W_policy = cp.asarray(data["W_policy"]) # Load W_policy
+        self.W_value = cp.asarray(data["W_value"])   # Load W_value
         self.lr = data.get("lr", self.lr)
         print(f"World Model loaded. Resuming at LR: {self.lr:.2e}")
