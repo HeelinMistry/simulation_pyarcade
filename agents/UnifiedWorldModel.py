@@ -27,7 +27,7 @@ class UnifiedWorldModel:
         self.short_repeat_penalty_multiplier = 2.5 # Heavier penalty for repeated SHORT
 
         # --- INTERVENTION 4: AGGRESSIVE SPARSITY & BOTTLENECKING ---
-        self.l1_lambda_repr = 8e-4 # INCREASED to force Repr Sparsity > 10%
+        self.l1_lambda_repr = 1.5e-3 # INCREASED to force Repr Sparsity > 10%
         self.l1_lambda_policy = 5e-4 # Increased L1 for Policy head (target 20-40% sparsity)
         self.l1_lambda_value = 0.0 # New: Lower L1 for value head to prevent aggressive pruning (set to 0 as requested)
         self.l1_lambda_dyn = 5e-4  # INCREASED to clean up the Hallucination Engine
@@ -35,7 +35,7 @@ class UnifiedWorldModel:
         self.temporal_contrastive_lambda = 0.01 # New: Forces z_t and predicted z_t+1 to be close
         self.temporal_contrastive_lambda_non_hold = 0.001 # New: Lower lambda for non-HOLD transitions
 
-        self.prune_threshold = 4.5e-3 # INCREASED: Shaving more 'average' noise
+        self.prune_threshold = 8e-3 # INCREASED: Shaving more 'average' noise
         self.dropout_rate = 0.20   # INCREASED: Forces model to find "Alpha Leaders"
         self.max_grad_norm = 1.0
 
