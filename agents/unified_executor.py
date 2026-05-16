@@ -66,7 +66,7 @@ class UnifiedExecutor:
 
     # ── State construction ────────────────────────────────────────────────────
 
-    def _portfolio_info(self, current_price: float) -> dict:
+    def portfolio_info(self, current_price: float) -> dict:
         if self.current_side is not None and self.inventory:
             entry = self.inventory[0]
             if self.current_side == "LONG":
@@ -84,7 +84,7 @@ class UnifiedExecutor:
     def get_state(self, indicators: np.ndarray, price: float) -> np.ndarray:
         """Build and return the current 92-d state vector."""
         self.aggregator.update(indicators)
-        portfolio_info = self._portfolio_info(price)
+        portfolio_info = self.portfolio_info(price)
         return self.aggregator.get_state(portfolio_info)
 
     # ── Core step ────────────────────────────────────────────────────────────

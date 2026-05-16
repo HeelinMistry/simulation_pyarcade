@@ -30,15 +30,14 @@ UPDATES_PER_STEP=2 to help the critic catch up to the fast-moving
 financial time series.
 """
 
-import os
 import time
+
 import numpy as np
 import pandas as pd
 
-from agents.sac_agent      import SACAgent
-from agents.replay_buffer  import ReplayBuffer
+from agents.replay_buffer import ReplayBuffer
+from agents.sac_agent import SACAgent
 from agents.unified_executor import UnifiedExecutor
-
 from data.data_manager import update_master_data
 
 # ─────────────────────────────────────────────
@@ -94,7 +93,7 @@ def compute_shaped_reward(
 
 
 def get_unrealized(executor: UnifiedExecutor, price: float) -> float:
-    info = executor._portfolio_info(price)
+    info = executor.portfolio_info(price)
     return float(info["unrealized_pnl"])
 
 
@@ -126,51 +125,41 @@ def run_epoch(executor: UnifiedExecutor, df: pd.DataFrame,
     prev_unrealized  = 0.0
 
     # Initialize for the first iteration
-    prev_state  = None   # s_{t-1} — state actor used last tick
-    prev_action = None
-    prev_reward = 0.0
-    prev_done   = False
+    # Before loop:
+    prev_state = executor.aggregator.get_state(executor.portfolio_info(prices_arr[WARMUP_IDX]))
+    prev_action, prev_reward, prev_done = None, 0.0, False
 
     for i in range(WARMUP_IDX + 1, n):
         indicators = indicators_arr[i]
-        price      = prices_arr[i]
+        price = prices_arr[i]
 
-        # ── Environment step ────────────────────────────────────────────────
-        # s_t is the state the actor now observes after the transition
         action, probs, realised_pnl, s_t = executor.step(indicators, price, tick=i)
+        # s_t = state actor used = market features at tick i + pre-execute portfolio
+
         curr_unrealized = get_unrealized(executor, price)
         action_counts[action] += 1
 
         if realised_pnl != 0.0:
             total_realised += realised_pnl
-            n_trades       += 1
-
-        # ── Reward shaping ──────────────────────────────────────────────────
-        if realised_pnl != 0.0:
-            prev_unrealized = 0.0   # position just closed; unrealized was already credited
+            n_trades += 1
+            prev_unrealized = 0.0
 
         reward = compute_shaped_reward(realised_pnl, prev_unrealized, curr_unrealized)
         prev_unrealized = curr_unrealized if executor.current_side else 0.0
-
         done = (i == n - 1)
 
-        # ── Buffer push and SAC update ──────────────────────────────────────
-        if train and prev_state is not None:
-            # (s_{t-1}, a_{t-1}, r_{t-1}, s_t) — action was chosen from s_{t-1},
-            # s_t is the state the actor now observes after that transition
+        if train and prev_action is not None:
+            # Transition: agent was in prev_state, took prev_action, got prev_reward, landed in s_t
             replay_buffer.push(prev_state, prev_action, prev_reward, s_t, prev_done)
-
-            # Update SAC on schedule
             if (i % UPDATE_EVERY == 0) and replay_buffer.is_ready(BATCH_SIZE):
                 for _ in range(UPDATES_PER_STEP):
                     agent.update(replay_buffer, batch_size=BATCH_SIZE)
                 update_count += 1
 
-        # ── Prepare for next iteration ──────────────────────────────────────
-        prev_state  = s_t
+        prev_state = s_t
         prev_action = action
         prev_reward = reward
-        prev_done   = done
+        prev_done = done
 
         # ── Console heartbeat ────────────────────────────────────────────────
         if train and (i % LOG_EVERY_TICKS == 0):
