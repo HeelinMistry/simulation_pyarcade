@@ -10,7 +10,6 @@ class SimulationEnv(arcade.Window):
         super().__init__(1000, 700, title)
         self.df = data_df
         self.executor = executor
-        self.current_tick = 0
         self.show_chart = show_chart
         self.chart_shapes = ShapeElementList()
         self.signal_labels = []
@@ -19,6 +18,13 @@ class SimulationEnv(arcade.Window):
         self.title_text = arcade.Text(
             "", x=20, y=650, color=arcade.color.WHITE, font_size=18, bold=True
         )
+
+        # Warm up aggregator to match training conditions
+        WARMUP_IDX = 96 # Based on slowest pace agent (pace=12) needing 8x12=96 rows
+        indicators_arr = self.df[["RSI_Scaled","MACD_Scaled","BB_Scaled",
+                                  "OBV_Scaled","ATR_Scaled","MeanDev_Scaled"]].values.astype(np.float32)
+        self.executor.aggregator.warm_up_all(indicators_arr, WARMUP_IDX)
+        self.current_tick = WARMUP_IDX   # start rendering from warm tick
 
     def get_chart_y(self, price):
         min_p = self.df["Close"].min()
@@ -101,7 +107,7 @@ class SimulationEnv(arcade.Window):
 
     def get_entropy(self):
         p = self.executor.last_probs
-        return -np.sum(p * np.log2(p + 1e-9)) if p is not None else 0.0
+        return -np.sum(p * np.log2(p + 1e-9))
 
     def on_draw(self):
         self.clear()

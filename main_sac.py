@@ -92,9 +92,12 @@ def compute_shaped_reward(
     return realised_pnl + SHAPING_COEFF * unrealized_delta
 
 
-def get_unrealized(executor: UnifiedExecutor, price: float) -> float:
-    info = executor.portfolio_info(price)
-    return float(info["unrealized_pnl"])
+def get_unrealized(state: np.ndarray) -> float:
+    """
+    Extracts unrealized P/L from the state vector.
+    Assumes unrealized P/L is the last element of the state vector.
+    """
+    return float(state[-1])
 
 
 def run_epoch(executor: UnifiedExecutor, df: pd.DataFrame,
@@ -136,7 +139,7 @@ def run_epoch(executor: UnifiedExecutor, df: pd.DataFrame,
         action, probs, realised_pnl, s_t = executor.step(indicators, price, tick=i)
         # s_t = state actor used = market features at tick i + pre-execute portfolio
 
-        curr_unrealized = get_unrealized(executor, price)
+        curr_unrealized = get_unrealized(s_t)
         action_counts[action] += 1
 
         if realised_pnl != 0.0:
