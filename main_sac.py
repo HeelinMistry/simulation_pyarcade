@@ -125,16 +125,19 @@ def run_epoch(executor: UnifiedExecutor, df: pd.DataFrame,
     update_count     = 0
     prev_unrealized  = 0.0
 
-    prev_state = executor.aggregator.get_state(
-        executor._portfolio_info(prices_arr[WARMUP_IDX])
-    )
+    # Initialize for the first iteration
+    prev_state  = None   # s_{t-1} — state actor used last tick
+    prev_action = None
+    prev_reward = 0.0
+    prev_done   = False
 
     for i in range(WARMUP_IDX + 1, n):
         indicators = indicators_arr[i]
         price      = prices_arr[i]
 
         # ── Environment step ────────────────────────────────────────────────
-        action, probs, realised_pnl, curr_state = executor.step(indicators, price, tick=i)
+        # s_t is the state the actor now observes after the transition
+        action, probs, realised_pnl, s_t = executor.step(indicators, price, tick=i)
         curr_unrealized = get_unrealized(executor, price)
         action_counts[action] += 1
 
@@ -151,13 +154,11 @@ def run_epoch(executor: UnifiedExecutor, df: pd.DataFrame,
 
         done = (i == n - 1)
 
-        # ── Build next state ─────────────────────────────────────────────────
-        # We need s_t for buffer but get_state() already advanced the aggregator.
-        # We stored prev_state before the step, so:
-        curr_state = executor.aggregator.get_state(executor._portfolio_info(price))
-
-        if train:
-            replay_buffer.push(prev_state, action, reward, curr_state, done)
+        # ── Buffer push and SAC update ──────────────────────────────────────
+        if train and prev_state is not None:
+            # (s_{t-1}, a_{t-1}, r_{t-1}, s_t) — action was chosen from s_{t-1},
+            # s_t is the state the actor now observes after that transition
+            replay_buffer.push(prev_state, prev_action, prev_reward, s_t, prev_done)
 
             # Update SAC on schedule
             if (i % UPDATE_EVERY == 0) and replay_buffer.is_ready(BATCH_SIZE):
@@ -165,7 +166,11 @@ def run_epoch(executor: UnifiedExecutor, df: pd.DataFrame,
                     agent.update(replay_buffer, batch_size=BATCH_SIZE)
                 update_count += 1
 
-        prev_state = curr_state
+        # ── Prepare for next iteration ──────────────────────────────────────
+        prev_state  = s_t
+        prev_action = action
+        prev_reward = reward
+        prev_done   = done
 
         # ── Console heartbeat ────────────────────────────────────────────────
         if train and (i % LOG_EVERY_TICKS == 0):
@@ -191,7 +196,6 @@ def run_epoch(executor: UnifiedExecutor, df: pd.DataFrame,
 
 def main():
     df = update_master_data()
-    features = ["RSI_Scaled", "MACD_Scaled", "BB_Scaled", "OBV_Scaled", "ATR_Scaled", "MeanDev_Scaled"]
 
     # ── Load data ────────────────────────────────────────────────────────────
     df = df[["Open_time", "Close"] + FEATURES].dropna().reset_index(drop=True)
