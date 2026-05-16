@@ -192,8 +192,6 @@ def run_epoch(executor: UnifiedExecutor, df: pd.DataFrame,
 def main():
     df = update_master_data()
     features = ["RSI_Scaled", "MACD_Scaled", "BB_Scaled", "OBV_Scaled", "ATR_Scaled", "MeanDev_Scaled"]
-    indicators = df[features].values.astype(np.float32)
-    prices = df["Close"].values.astype(np.float32)
 
     # ── Load data ────────────────────────────────────────────────────────────
     df = df[["Open_time", "Close"] + FEATURES].dropna().reset_index(drop=True)
