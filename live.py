@@ -61,10 +61,8 @@ class SimulationEnv(arcade.Window):
         ], dtype=np.float32)
 
         # --- 3. Execute Brain Step ---
-        action, probs = self.executor.step(
-            indicators=indicators,
-            price=row["Close"],
-            tick=idx
+        action, probs, _reward, _state = self.executor.step(
+            indicators=indicators, price=row["Close"], tick=idx
         )
 
         # --- 4. Draw Signals ---
