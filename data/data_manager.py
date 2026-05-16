@@ -1,7 +1,7 @@
 import os
 import glob
 import pandas as pd
-from preprocessing import preprocess_binance_data, preprocess_indicators_data
+from .preprocessing import preprocess_binance_data, preprocess_indicators_data
 
 # --- 1. Configuration ---
 RAW_DIR = "data/raw"

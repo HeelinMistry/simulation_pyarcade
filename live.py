@@ -1,79 +1,136 @@
 import arcade
-import pandas as pd
-import requests
+import numpy as np
+import os
+from arcade.shape_list import ShapeElementList, create_line
+from PIL import Image
 
-from agents.agent_master import MasterObserver
-from agents.probabilistic_brain import ProbabilisticBrain
-from environment import SimulationEnv
-from preprocessing import process_live_indicators
 
-BINANCE_API_URL = "https://api.binance.com/api/"
+class SimulationEnv(arcade.Window):
+    def __init__(self, data_df, executor, show_chart=False, title="Trading Simulator"):
+        super().__init__(1000, 700, title)
+        self.df = data_df
+        self.executor = executor
+        self.current_tick = 0
+        self.show_chart = show_chart
+        self.chart_shapes = ShapeElementList()
+        self.signal_labels = []
+        self.saved_outcome = False
 
-def get_live_candles(symbol="BTC"):
-    interval = '15m'
-    limit = 1000  # We only need enough to calculate the longest SMA (e.g., 200)
+        self.title_text = arcade.Text(
+            "", x=20, y=650, color=arcade.color.WHITE, font_size=18, bold=True
+        )
 
-    url = f"{BINANCE_API_URL}v3/klines?symbol={symbol}USDT&interval={interval}&limit={limit}"
-    response = requests.get(url)
+    def get_chart_y(self, price):
+        min_p = self.df["Close"].min()
+        max_p = self.df["Close"].max()
+        return 150 + ((price - min_p) / (max_p - min_p + 1e-9)) * 350
 
-    if response.status_code == 200:
-        data = response.json()
-        df = pd.DataFrame(data, columns=[
-            'Open_time', 'Open', 'High', 'Low', 'Close', 'Volume',
-            'Close_time', 'Quote_volume', 'Trades', 'Taker_buy_base', 'Taker_buy_quote', 'Ignore'
-        ])
+    def get_chart_x(self, tick):
+        return (tick / len(self.df)) * 900 + 50
 
-        # CRITICAL: Convert strings to numeric (Binance returns strings)
-        numeric_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
-        df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric)
+    def on_update(self, delta_time):
+        if self.current_tick >= len(self.df) - 1:
+            if not self.saved_outcome:
+                self.save_final_outcome()
+            return
 
-        # Convert Open_time to readable format if needed for UI
-        df['Open_time'] = pd.to_datetime(df['Open_time'], unit='ms')
+        idx = self.current_tick
+        row = self.df.iloc[idx]
+        next_row = self.df.iloc[idx + 1]
 
-        return df
-    else:
-        print(f"Error fetching data: {response.status_code}")
-        return None
+        # --- 1. Draw Price Line ---
+        if self.show_chart:
+            line = create_line(
+                start_x=self.get_chart_x(idx),
+                start_y=self.get_chart_y(row["Close"]),
+                end_x=self.get_chart_x(idx + 1),
+                end_y=self.get_chart_y(next_row["Close"]),
+                color=arcade.color.DARK_GRAY,
+                line_width=2
+            )
+            self.chart_shapes.append(line)
 
-def run_live_sim():
-    # 1. Fetch
-    raw_df = get_live_candles("XRP")
-    if raw_df is None: return
+        # --- 2. Feature Preparation (FIXED: Added ATR and MeanDev) ---
+        indicators = np.array([
+            row["RSI_Scaled"],
+            row["MACD_Scaled"],
+            row["BB_Scaled"],
+            row["OBV_Scaled"],
+            row["ATR_Scaled"],
+            row["MeanDev_Scaled"]
+        ], dtype=np.float32)
 
-    # 2. Process
-    df = process_live_indicators(raw_df)
-    df.dropna(inplace=True)  # Remove the "warm-up" period for indicators
-    df.reset_index(drop=True, inplace=True)  # Crucial for tick alignment
+        # --- 3. Execute Brain Step ---
+        action, probs = self.executor.step(
+            indicators=indicators,
+            price=row["Close"],
+            tick=idx
+        )
 
-    if df.isnull().values.any():
-        print("Warning: NaN values detected in indicators. Filling with 0.")
-        df = df.fillna(0)
+        # --- 4. Draw Signals ---
+        if action in (0, 1, 2):
+            if action == 0:
+                color, symbol = arcade.color.GREEN, "▲"
+            elif action == 1:
+                color, symbol = arcade.color.RED, "▼"
+            else:
+                color, symbol = arcade.color.ORANGE, "✘"
 
-    # 3. Brain & Agents (Same as before)
-    brain = ProbabilisticBrain(alpha=0.0005)
-    agents = [
-        MasterObserver("BRAIN_MASTER", pace=1, brain=brain)
-    ]
+            sig = arcade.Text(
+                text=symbol,
+                x=self.get_chart_x(idx),
+                y=self.get_chart_y(row["Close"]),
+                color=color,
+                font_size=10,
+                bold=True,
+                anchor_x="center",
+                anchor_y="center"
+            )
+            self.signal_labels.append(sig)
 
-    # 4. Background training on the 500 recent candles
-    print("Adapting brain to recent market conditions...")
-    for _ in range(10):  # 10 Epochs
-        for idx, row in df.iterrows():
-            for agent in agents:
-                if idx % agent.pace == 0:
-                    state, action = agent.act(row)
-                    agent.handle_reward(state, action, row['Close'])
+        self.current_tick += 1
 
-    # 5. UI Launch
-    # Reset stats so UI starts at 0.0%
-    for agent in agents:
-        agent.total_reward = 0.0
-        agent.inventory = []
+    def draw_probability_bars(self):
+        probs = self.executor.last_probs
+        if probs is None: return
+        labels = ["LONG", "SHORT", "CLOSE", "HOLD"]
+        colors = [arcade.color.GREEN, arcade.color.RED, arcade.color.ORANGE, arcade.color.GRAY]
+        for i, p in enumerate(probs):
+            width = max(1, p * 200)
+            rect = arcade.rect.XYWH(750 + width / 2, 50 + (i * 35), width, 25)
+            arcade.draw_rect_filled(rect, colors[i])
+            arcade.draw_text(f"{labels[i]}: {p:.1%}", 660, 45 + (i * 35), arcade.color.WHITE, 10)
 
-    window = SimulationEnv(df, agents, brain, show_chart=True)
-    arcade.run()
+    def get_entropy(self):
+        p = self.executor.last_probs
+        return -np.sum(p * np.log2(p + 1e-9)) if p is not None else 0.0
 
-    return brain
+    def on_draw(self):
+        self.clear()
+        safe = min(self.current_tick, len(self.df) - 1)
+        row = self.df.iloc[safe]
+        if self.show_chart:
+            self.chart_shapes.draw()
+            for s in self.signal_labels: s.draw()
 
-if __name__ == "__main__":
-    trained_brain = run_live_sim()
+        self.title_text.text = f"Tick: {self.current_tick} | Price: ${row['Close']:.4f}"
+        self.title_text.draw()
+
+        status = self.executor.get_status()
+        arcade.draw_text(f"Position: {status['position']} | P/L: {status['pnl']:.2%}", 20, 600, arcade.color.WHITE, 12)
+        arcade.draw_text(f"Policy Entropy: {self.get_entropy():.2f} bits", 750, 200, arcade.color.WHITE, 10)
+        self.draw_probability_bars()
+
+    def save_final_outcome(self):
+        """Captures the final state of the chart and saves it as a PNG."""
+        os.makedirs("outcomes", exist_ok=True)
+        filename = f"outcomes/simulation_outcome_{self.executor.name}.png"
+
+        image = arcade.get_image()
+        image.save(filename)
+
+        self.saved_outcome = True
+        print(f"✅ Simulation outcome saved to: {filename}")
+
+    def on_close(self):
+        super().on_close()
