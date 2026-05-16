@@ -39,7 +39,7 @@ def load_real_data():
     """Returns (indicators_np [N,92_raw_features], prices_np [N])
     NOTE: indicators here are the raw 6-feature rows, NOT the aggregated
     92-d state.  We build real 92-d states inside the checks using the
-    StateAggregator so results match exactly what training sees."""
+    StateAggregator so distributions are authentic."""
     if not os.path.exists(MASTER_CSV):
         raise FileNotFoundError(f"❌ Master CSV not found at {MODEL_PATH}")
     df = pd.read_csv(MASTER_CSV)
@@ -103,7 +103,7 @@ def plot_visual_diagnostics(model, real_states_np):
     w_dyn_state  = cp.asnumpy(model.W_dyn_state)
     w_dyn_reward = cp.asnumpy(model.W_dyn_reward)
     w_dyn      = np.concatenate([w_dyn_state, w_dyn_reward], axis=1)
-    w_pred     = cp.asnumpy(model.W_pred)
+    w_pred     = cp.asnumpy(cp.concatenate([model.W_policy, model.W_value], axis=1)) # Fix: concatenate policy and value weights
 
     # Calculate end-to-end sensitivity for the representation network
     # This approximates the Jacobian by chaining absolute weight matrices
@@ -254,7 +254,7 @@ def run_numerical_health_check(model, real_states_np, real_returns_np):
     w_repr3     = cp.asnumpy(model.W_repr3)
     w_dyn_state = cp.asnumpy(model.W_dyn_state)
     w_dyn_reward= cp.asnumpy(model.W_dyn_reward)
-    w_pred      = cp.asnumpy(model.W_pred)
+    w_pred      = cp.asnumpy(cp.concatenate([model.W_policy, model.W_value], axis=1)) # Fix: concatenate policy and value weights
 
     real_batch  = cp.asarray(real_states_np, dtype=cp.float32)
     latents     = model.get_initial_state(real_batch)

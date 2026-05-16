@@ -58,9 +58,8 @@ class UnifiedExecutor:
         # 2. Conviction Filter: Don't open new positions unless sure.
         # Threshold matches training exactly so the model operates in the
         # same decision regime it was rewarded for.
-        if self.current_side is None:
-            if action in (0, 1) and probs[action] < self.min_conviction:
-                action = 3  # Force HOLD
+        if action in (0, 1) and probs[action] < self.min_conviction:
+            action = 3  # Force HOLD
 
         # 3. Execute action — 0: LONG, 1: SHORT, 2: CLOSE, 3: HOLD
         if action == 0 and self.current_side != "LONG":
