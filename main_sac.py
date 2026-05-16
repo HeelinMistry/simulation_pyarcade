@@ -209,8 +209,8 @@ def main():
 
     replay_buffer = ReplayBuffer(capacity=BUFFER_CAPACITY)
 
-    train_executor = UnifiedExecutor("Train", agent, paces=PACES, deterministic=False)
-    val_executor   = UnifiedExecutor("Val",   agent, paces=PACES, deterministic=True)
+    train_executor = UnifiedExecutor("Train", agent, paces=PACES, deterministic=False, num_indicators=len(FEATURES))
+    val_executor   = UnifiedExecutor("Val",   agent, paces=PACES, deterministic=True, num_indicators=len(FEATURES))
 
     best_val_pnl = -np.inf
 
@@ -236,7 +236,6 @@ def main():
         v_pnl   = val_metrics["realised_pnl"]
         t_ac    = train_metrics["action_counts"]
         v_ac    = val_metrics["action_counts"]
-        t_n     = sum(t_ac) - t_ac[3]   # non-HOLD ticks
 
         def pct_str(counts):
             total = max(sum(counts), 1)

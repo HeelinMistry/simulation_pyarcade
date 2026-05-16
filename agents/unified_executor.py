@@ -46,10 +46,11 @@ class UnifiedExecutor:
         agent,                          # SACAgent — avoids circular import
         paces:         tuple = (1, 2, 4, 8, 12),
         deterministic: bool  = False,
+        num_indicators: int = 6, # Added num_indicators
     ):
         self.name          = name
         self.agent         = agent
-        self.aggregator    = StateAggregator(paces)
+        self.aggregator    = StateAggregator(paces, num_indicators=num_indicators) # Pass num_indicators
         self.deterministic = deterministic
 
         # Position state
