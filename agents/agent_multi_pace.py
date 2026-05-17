@@ -1,5 +1,5 @@
 import numpy as np
-
+import collections
 
 class MultiPaceAgent:
     def __init__(self, pace, max_history=8, num_indicators=6):  # Added num_indicators
@@ -30,26 +30,18 @@ class MultiPaceAgent:
         if self.num_indicators == 0 and len(indicators) > 0:
             self.num_indicators = len(indicators)
 
+        if not isinstance(self.history, collections.deque):
+            self.history = collections.deque(self.history, maxlen=self.max_history)
         self.history.append(indicators)
-        if len(self.history) > self.max_history:
-            self.history.pop(0)
 
     def get_state(self):
-        # Dynamically determine size based on stored num_indicators
         if len(self.history) == 0:
-            # Return a zero-filled array of the expected size (num_indicators * 3)
-            return np.zeros(self.num_indicators * 3, dtype=np.float32)
-
+            return np.zeros(self.num_indicators * 2, dtype=np.float32)
         h = np.array(self.history)
         cur = h[-1]
-
         if len(self.history) < 2:
-            # Return [cur, zeros, zeros]
-            return np.concatenate([cur, np.zeros(self.num_indicators), np.zeros(self.num_indicators)])
-
+            return np.concatenate([cur, np.zeros(self.num_indicators)])
         mean = h.mean(axis=0)
         std = h.std(axis=0) + 1e-6
         slope = (cur - mean) / std
-
-        # Concatenate 3 states per indicator: [Current, Slope, Volatility]
-        return np.concatenate([cur, slope, std]).astype(np.float32)
+        return np.concatenate([cur, slope]).astype(np.float32)

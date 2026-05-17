@@ -44,7 +44,7 @@ class UnifiedExecutor:
         self,
         name:          str,
         agent,                          # SACAgent — avoids circular import
-        paces:         tuple = (1, 2, 4, 8, 12),
+        paces: tuple = (1, 4, 16, 64),
         deterministic: bool  = False,
         num_indicators: int = 6, # Added num_indicators
     ):
@@ -54,7 +54,7 @@ class UnifiedExecutor:
         self.deterministic = deterministic
 
         # Position state
-        self.inventory     = collections.deque(maxlen=100)
+        self.inventory     = collections.deque(maxlen=1)
         self.current_side  = None   # "LONG" | "SHORT" | None
 
         # P/L tracking
@@ -116,9 +116,10 @@ class UnifiedExecutor:
         """Apply action to position, return realised P/L (0 if no close)."""
         reward = 0.0
 
-        if action == 0:   # LONG
+        if action == 0:  # LONG
             if self.current_side == "SHORT":
                 reward = self._close(price)
+                reward -= COMMISSION  # expose the new entry cost upfront
             if self.current_side != "LONG":
                 self.inventory.append(price * (1 + COMMISSION))
                 self.current_side = "LONG"
@@ -126,6 +127,7 @@ class UnifiedExecutor:
         elif action == 1:  # SHORT
             if self.current_side == "LONG":
                 reward = self._close(price)
+                reward -= COMMISSION  # expose the new entry cost upfront
             if self.current_side != "SHORT":
                 self.inventory.append(price * (1 - COMMISSION))
                 self.current_side = "SHORT"

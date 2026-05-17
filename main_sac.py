@@ -49,8 +49,8 @@ BEST_PATH        = "outcomes/sac_agent_best.pt"
 
 FEATURES   = ["RSI_Scaled", "MACD_Scaled", "BB_Scaled",
               "OBV_Scaled", "ATR_Scaled", "MeanDev_Scaled"]
-PACES      = (1, 2, 4, 8, 12)
-STATE_DIM  = (len(FEATURES) * 3 * len(PACES)) + 2   # 92
+PACES      = (1, 4, 16, 64)
+STATE_DIM  = (len(FEATURES) * 2 * len(PACES)) + 2   # 50 (6 indicators * 2 features per indicator * 4 paces + 2 portfolio features)
 ACTION_DIM = 4
 
 # Training hyperparameters
@@ -60,8 +60,8 @@ WARMUP_IDX       = 200          # aggregator warm-up lookback rows
 
 BUFFER_CAPACITY  = 200_000
 BATCH_SIZE       = 256
-UPDATE_EVERY     = 4            # update SAC every N environment steps
-UPDATES_PER_STEP = 2            # gradient steps per update call
+UPDATE_EVERY     = 8            # update SAC every N environment steps
+UPDATES_PER_STEP = 1            # gradient steps per update call
 LR               = 3e-4
 GAMMA            = 0.99
 TAU              = 0.005
@@ -78,18 +78,15 @@ SAVE_EVERY_EPOCH = 5
 # Helpers
 # ─────────────────────────────────────────────
 
-def compute_shaped_reward(
-    realised_pnl: float,
-    prev_unrealized: float,
-    curr_unrealized: float,
-) -> float:
-    """
-    Combine realised P/L with a small unrealized-delta shaping term.
-    If the position was just closed, realised_pnl is non-zero and
-    prev_unrealized/curr_unrealized are both 0 (position gone).
-    """
+# main_sac.py compute_shaped_reward
+HOLDING_COST = 0.0001   # 0.01% per tick held — equivalent to commission pressure
+
+def compute_shaped_reward(realised_pnl, prev_unrealized, curr_unrealized, is_holding):
     unrealized_delta = curr_unrealized - prev_unrealized
-    return realised_pnl + SHAPING_COEFF * unrealized_delta
+    shaped = realised_pnl + SHAPING_COEFF * unrealized_delta
+    if is_holding:   # True when current_side is not None and realised_pnl == 0
+        shaped -= HOLDING_COST
+    return shaped
 
 
 def get_unrealized(state: np.ndarray) -> float:
@@ -147,7 +144,10 @@ def run_epoch(executor: UnifiedExecutor, df: pd.DataFrame,
             n_trades += 1
             prev_unrealized = 0.0
 
-        reward = compute_shaped_reward(realised_pnl, prev_unrealized, curr_unrealized)
+        reward = compute_shaped_reward(
+            realised_pnl, prev_unrealized, curr_unrealized,
+            is_holding=(executor.current_side is not None and realised_pnl == 0.0)
+        )
         prev_unrealized = curr_unrealized if executor.current_side else 0.0
         done = (i == n - 1)
 
@@ -253,6 +253,11 @@ def main():
             best_val_pnl = v_pnl
             agent.save(BEST_PATH)
             print(f"  ⭐ New best val P/L: {best_val_pnl:+.4%}")
+
+        # Early stopping on val PnL degradation
+        if best_val_pnl > 0 and v_pnl < best_val_pnl * 0.5:
+            print(f"  ⚠ Val PnL degraded to {v_pnl:.4%} — early stop at epoch {epoch}")
+            break
 
         # Periodic checkpoint
         if epoch % SAVE_EVERY_EPOCH == 0:

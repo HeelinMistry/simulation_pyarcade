@@ -25,7 +25,7 @@ import torch.nn as nn
 class QNetwork(nn.Module):
     """Single Q-network: state → Q(s, a) for all actions."""
 
-    def __init__(self, state_dim: int = 92, hidden_dim: int = 256, action_dim: int = 4):
+    def __init__(self, state_dim: int = 50, hidden_dim: int = 256, action_dim: int = 4):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(state_dim, hidden_dim),
@@ -53,7 +53,7 @@ class DualCritic(nn.Module):
     and target-network management cleaner.
     """
 
-    def __init__(self, state_dim: int = 92, hidden_dim: int = 256, action_dim: int = 4):
+    def __init__(self, state_dim: int = 50, hidden_dim: int = 256, action_dim: int = 4):
         super().__init__()
         self.q1 = QNetwork(state_dim, hidden_dim, action_dim)
         self.q2 = QNetwork(state_dim, hidden_dim, action_dim)

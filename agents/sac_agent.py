@@ -32,6 +32,7 @@ import os
 import torch
 import torch.nn.functional as F
 import numpy as np
+import pickle
 
 from models.actor import Actor
 from models.critic import DualCritic
@@ -40,7 +41,7 @@ from models.critic import DualCritic
 class SACAgent:
     def __init__(
         self,
-        state_dim:      int   = 92,
+        state_dim:      int   = 50,
         action_dim:     int   = 4,
         hidden_dim:     int   = 256,
         lr:             float = 3e-4,
@@ -188,6 +189,8 @@ class SACAgent:
         self.alpha_opt.zero_grad()
         alpha_loss.backward()
         self.alpha_opt.step()
+        with torch.no_grad():
+            self.log_alpha.clamp_(min=-2.0)
 
         # ── ④ Soft target update ─────────────────────────────────────────────
         # θ_target ← τ·θ + (1-τ)·θ_target
@@ -206,7 +209,7 @@ class SACAgent:
 
     # ── Persistence ──────────────────────────────────────────────────────────
 
-    def save(self, path: str = "outcomes/sac_agent.pt"):
+    def save(self, path: str = "outcomes/sac_agent.pt", replay_buffer=None):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         torch.save({
             "actor":          self.actor.state_dict(),
@@ -219,13 +222,18 @@ class SACAgent:
             "training_steps": self.training_steps,
             "target_entropy": self.target_entropy,
         }, path)
+        if replay_buffer is not None:
+            buffer_path = path.replace(".pt", "_buffer.pkl")
+            with open(buffer_path, "wb") as f:
+                pickle.dump(list(replay_buffer.buffer), f)
+            print(f"[SACAgent] ✅ Saved replay buffer → {buffer_path}")
         print(f"[SACAgent] ✅ Saved → {path}  (step {self.training_steps})")
 
-    def load(self, path: str = "outcomes/sac_agent.pt"):
+    def load(self, path: str = "outcomes/sac_agent.pt", replay_buffer=None):
         if not os.path.exists(path):
             print(f"[SACAgent] ⚠️  No checkpoint at {path} — starting fresh.")
             return
-        ckpt = torch.load(path, map_location=self.device)
+        ckpt = torch.load(path, map_location=self.device, weights_only=False)
         self.actor.load_state_dict(ckpt["actor"])
         self.critic.load_state_dict(ckpt["critic"])
         self.critic_target.load_state_dict(ckpt["critic_target"])
@@ -237,3 +245,13 @@ class SACAgent:
         self.target_entropy    = ckpt.get("target_entropy", self.target_entropy)
         print(f"[SACAgent] ✅ Loaded ← {path}  "
               f"(step {self.training_steps}  α={self.last_alpha:.4f})")
+        
+        if replay_buffer is not None:
+            buffer_path = path.replace(".pt", "_buffer.pkl")
+            if os.path.exists(buffer_path):
+                with open(buffer_path, "rb") as f:
+                    for transition in pickle.load(f):
+                        replay_buffer.buffer.append(transition)
+                print(f"[SACAgent] ✅ Loaded replay buffer ← {buffer_path}")
+            else:
+                print(f"[SACAgent] ⚠️  No replay buffer checkpoint at {buffer_path}.")
