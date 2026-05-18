@@ -58,12 +58,15 @@ NUM_EPOCHS       = 200
 TRAIN_SPLIT      = 0.8          # first 80% for training, last 20% for val
 WARMUP_IDX       = 200          # aggregator warm-up lookback rows
 
+PATIENCE = 15          # epochs without improvement before stopping
+WARMUP_EPOCHS = 10
+
 BUFFER_CAPACITY  = 200_000
 BATCH_SIZE       = 256
 UPDATE_EVERY     = 8            # update SAC every N environment steps
 UPDATES_PER_STEP = 1            # gradient steps per update call
 LR               = 3e-4
-GAMMA            = 0.99
+GAMMA            = 0.97
 TAU              = 0.005
 
 # Reward shaping
@@ -209,6 +212,7 @@ def main():
     val_executor   = UnifiedExecutor("Val",   agent, paces=PACES, deterministic=True, num_indicators=len(FEATURES))
 
     best_val_pnl = -np.inf
+    no_improve = 0
 
     # ── Training loop ────────────────────────────────────────────────────────
     for epoch in range(1, NUM_EPOCHS + 1):
@@ -248,15 +252,17 @@ def main():
               f"actor_loss={agent.last_actor_loss:.4f}")
         print(f"  Time  : {elapsed:.1f}s  |  updates this epoch: {train_metrics['update_count']}")
 
-        # Save best model on val P/L
+        # Early stopping on val PnL degradation
         if v_pnl > best_val_pnl:
             best_val_pnl = v_pnl
+            no_improve = 0
             agent.save(BEST_PATH)
             print(f"  ⭐ New best val P/L: {best_val_pnl:+.4%}")
+        else:
+            no_improve += 1
 
-        # Early stopping on val PnL degradation
-        if best_val_pnl > 0 and v_pnl < best_val_pnl * 0.5:
-            print(f"  ⚠ Val PnL degraded to {v_pnl:.4%} — early stop at epoch {epoch}")
+        if epoch >= WARMUP_EPOCHS and no_improve >= PATIENCE:
+            print(f"  ⚠ No val improvement for {PATIENCE} epochs — early stop")
             break
 
         # Periodic checkpoint

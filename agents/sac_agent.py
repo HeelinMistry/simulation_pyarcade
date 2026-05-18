@@ -22,7 +22,7 @@ SAC-Discrete update equations (per batch):
              (minimise → maximise Q while keeping entropy high)
 
   ③ Temp:    L_α = α * (H[π(·|s)] - H_target)
-             where H_target = 0.98 * log(|A|) ≈ 1.35 nats for |A|=4
+             where H_target = 0.70 * log(|A|) ≈ 0.97 nats for |A|=4
              (α increases if current entropy < target, decreases if >)
 
   ④ Target:  θ_target ← τ·θ + (1-τ)·θ_target   (soft EMA, every step)
@@ -76,7 +76,7 @@ class SACAgent:
         # For |A|=4:  0.98 * ln(4) ≈ 1.355 nats  ≈ 1.96 bits
         # log_alpha is the learnable scalar; alpha = exp(log_alpha) is always +.
         if target_entropy is None:
-            self.target_entropy = 0.98 * np.log(action_dim)
+            self.target_entropy = 0.7 * np.log(action_dim)
         else:
             self.target_entropy = float(target_entropy)
 
@@ -126,6 +126,8 @@ class SACAgent:
         R  = torch.FloatTensor(rewards).unsqueeze(1).to(self.device)
         S_ = torch.FloatTensor(next_states).to(self.device)
         D  = torch.FloatTensor(dones).unsqueeze(1).to(self.device)
+
+        R = R / (R.std() + 1e-8)
 
         # ── ① Critic update ─────────────────────────────────────────────────
         with torch.no_grad():

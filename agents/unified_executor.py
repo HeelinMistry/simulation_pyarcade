@@ -6,7 +6,7 @@ Thin execution layer that sits between the SAC agent and the environment.
 What changed vs the World Model version:
   REMOVED  — MCTSPlanner reference and 10-step rollout
   REMOVED  — conviction filter (SAC's temperature handles decisiveness)
-  KEPT     — StateAggregator (92-d vector unchanged)
+  KEPT     — StateAggregator
   KEPT     — position/PnL tracking and commission model
   KEPT     — get_status() and get_state() signatures (live_unified.py compatible)
   CHANGED  — step() calls agent.select_action() instead of planner.search_best_action()
@@ -98,7 +98,7 @@ class UnifiedExecutor:
         action : int   0=LONG 1=SHORT 2=CLOSE 3=HOLD
         probs  : np.ndarray (4,)
         reward : float  realised P/L this tick (0 if no close event)
-        state  : np.ndarray (92,) the current state vector
+        state  : np.ndarray the current state vector
         """
         self.tick = tick
         state     = self.get_state(indicators, price) # State is computed here and returned

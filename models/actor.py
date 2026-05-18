@@ -1,7 +1,7 @@
 """
 models/actor.py
 ───────────────
-Discrete SAC Actor: maps a 92-d state vector to a probability
+Discrete SAC Actor: maps a state vector to a probability
 distribution over 4 actions (LONG, SHORT, CLOSE, HOLD).
 
 Design choices:
