@@ -109,6 +109,7 @@ ACTION_COLORS = ["#2ecc71", "#e74c3c", "#f39c12", "#95a5a6"]
 TRAIN_SPLIT = 0.8
 WARMUP_IDX  = 200
 OUT_DIR     = "outcomes/diagnostics"
+GAMMA = 0.97
 
 os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -1298,7 +1299,7 @@ def main():
     print(f"{'═'*62}\n")
 
     # ── Load agent ────────────────────────────────────────────────────────────
-    agent = SACAgent(state_dim=STATE_DIM, action_dim=ACTION_DIM)
+    agent = SACAgent(state_dim=STATE_DIM, action_dim=ACTION_DIM, gamma=GAMMA)
     agent.load(args.checkpoint)
     agent.actor.eval()
     agent.critic.eval()

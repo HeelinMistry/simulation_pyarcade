@@ -45,7 +45,7 @@ class SACAgent:
         action_dim:     int   = 4,
         hidden_dim:     int   = 256,
         lr:             float = 3e-4,
-        gamma:          float = 0.99,
+        gamma:          float = 0.97,
         tau:            float = 0.005,   # soft target update rate
         target_entropy: float = None,    # None → auto (0.98 * log|A|)
         device:         str   = None,
@@ -56,8 +56,8 @@ class SACAgent:
         self.action_dim = action_dim
 
         # ── Networks ────────────────────────────────────────────────────────
-        self.actor          = Actor(state_dim, hidden_dim, action_dim).to(self.device)
-        self.critic         = DualCritic(state_dim, hidden_dim, action_dim).to(self.device)
+        self.actor = Actor(state_dim, hidden_dim, action_dim).to(self.device)
+        self.critic = DualCritic(state_dim, hidden_dim, action_dim).to(self.device)
         self.critic_target  = DualCritic(state_dim, hidden_dim, action_dim).to(self.device)
         self.critic_target.load_state_dict(self.critic.state_dict())
 
@@ -68,7 +68,9 @@ class SACAgent:
 
         # ── Optimisers ──────────────────────────────────────────────────────
         self.actor_opt  = torch.optim.Adam(self.actor.parameters(),  lr=lr)
-        self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=lr)
+        self.critic_opt = torch.optim.Adam(
+            self.critic.parameters(), lr=lr, weight_decay=1e-4
+        )
 
         # ── Automatic entropy temperature ────────────────────────────────────
         # H_target in nats: we want the policy to maintain at least 98% of

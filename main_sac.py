@@ -58,8 +58,8 @@ NUM_EPOCHS       = 200
 TRAIN_SPLIT      = 0.8          # first 80% for training, last 20% for val
 WARMUP_IDX       = 200          # aggregator warm-up lookback rows
 
-PATIENCE = 15          # epochs without improvement before stopping
-WARMUP_EPOCHS = 10
+PATIENCE = 10          # epochs without improvement before stopping
+WARMUP_EPOCHS = 3
 
 BUFFER_CAPACITY  = 200_000
 BATCH_SIZE       = 256
@@ -82,13 +82,18 @@ SAVE_EVERY_EPOCH = 5
 # ─────────────────────────────────────────────
 
 # main_sac.py compute_shaped_reward
-HOLDING_COST = 0.0001   # 0.01% per tick held — equivalent to commission pressure
+HOLDING_COST   = 0.0001   # flat per-tick cost while in any position
+STOP_LOSS_COST = 0.05
 
 def compute_shaped_reward(realised_pnl, prev_unrealized, curr_unrealized, is_holding):
     unrealized_delta = curr_unrealized - prev_unrealized
     shaped = realised_pnl + SHAPING_COEFF * unrealized_delta
-    if is_holding:   # True when current_side is not None and realised_pnl == 0
+    if is_holding:
         shaped -= HOLDING_COST
+        # Escalating penalty when unrealized loss exceeds 1%
+        # Makes holding a deep loser increasingly expensive
+        if curr_unrealized < -0.01:
+            shaped -= HOLDING_COST * abs(curr_unrealized) * 10
     return shaped
 
 
@@ -200,8 +205,9 @@ def main():
     print(f"  Train rows: {len(train_df):,}  |  Val rows: {len(val_df):,}")
 
     # ── Initialise components ────────────────────────────────────────────────
-    agent  = SACAgent(
+    agent = SACAgent(
         state_dim=STATE_DIM, action_dim=ACTION_DIM,
+        hidden_dim=128, 
         lr=LR, gamma=GAMMA, tau=TAU,
     )
     agent.load(CHECKPOINT_PATH)   # resumes if checkpoint exists

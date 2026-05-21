@@ -43,24 +43,38 @@ class ReplayBuffer:
 
     def sample(self, batch_size: int):
         """
-        Returns five numpy arrays ready to be converted to tensors.
-        Raises ValueError if buffer is too small — caller should check
-        len(buffer) >= batch_size before calling.
+        Sample with soft action balancing — prevents one action from
+        dominating the batch and causing one-sided Q-value collapse.
+        Each action gets at most 40% of the batch; remainder filled randomly.
         """
         if len(self.buffer) < batch_size:
-            raise ValueError(
-                f"Buffer has {len(self.buffer)} transitions, need {batch_size}."
-            )
+            raise ValueError(f"Buffer too small: {len(self.buffer)} < {batch_size}")
 
-        batch = random.sample(self.buffer, batch_size)
-        states, actions, rewards, next_states, dones = zip(*batch)
+        by_action = {a: [] for a in range(4)}
+        for t in self.buffer:
+            by_action[t[1]].append(t)  # t[1] is the action
 
+        max_per_action = int(batch_size * 0.40)
+        selected = []
+        for a in range(4):
+            pool = by_action[a]
+            n = min(len(pool), max_per_action)
+            if n > 0:
+                selected.extend(random.sample(pool, n))
+
+        # Pad to batch_size with fully random samples if needed
+        remaining = batch_size - len(selected)
+        if remaining > 0:
+            selected.extend(random.sample(list(self.buffer), remaining))
+
+        random.shuffle(selected)
+        states, actions, rewards, next_states, dones = zip(*selected[:batch_size])
         return (
-            np.array(states,      dtype=np.float32),   # (B, state_dim)
-            np.array(actions,     dtype=np.int64),      # (B,)
-            np.array(rewards,     dtype=np.float32),    # (B,)
-            np.array(next_states, dtype=np.float32),    # (B, state_dim)
-            np.array(dones,       dtype=np.float32),    # (B,)
+            np.array(states, dtype=np.float32),
+            np.array(actions, dtype=np.int64),
+            np.array(rewards, dtype=np.float32),
+            np.array(next_states, dtype=np.float32),
+            np.array(dones, dtype=np.float32),
         )
 
     def __len__(self) -> int:
