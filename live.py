@@ -563,7 +563,7 @@ class LiveWindow(arcade.Window):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _load_agent() -> SACAgent:
-    agent = SACAgent(state_dim=STATE_DIM, action_dim=ACTION_DIM)
+    agent = SACAgent(state_dim=STATE_DIM, action_dim=ACTION_DIM, hidden_dim=128)
     agent.load(CHECKPOINT_PATH)
     agent.actor.eval()
     agent.critic.eval()

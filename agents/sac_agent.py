@@ -238,9 +238,9 @@ class SACAgent:
             print(f"[SACAgent] ⚠️  No checkpoint at {path} — starting fresh.")
             return
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
-        self.actor.load_state_dict(ckpt["actor"])
-        self.critic.load_state_dict(ckpt["critic"])
-        self.critic_target.load_state_dict(ckpt["critic_target"])
+        self.actor.load_state_dict(ckpt["actor"], strict=False)
+        self.critic.load_state_dict(ckpt["critic"], strict=False)
+        self.critic_target.load_state_dict(ckpt["critic_target"], strict=False)
         self.log_alpha.data    = ckpt["log_alpha"].to(self.device)
         self.actor_opt.load_state_dict(ckpt["actor_opt"])
         self.critic_opt.load_state_dict(ckpt["critic_opt"])

@@ -1299,7 +1299,7 @@ def main():
     print(f"{'═'*62}\n")
 
     # ── Load agent ────────────────────────────────────────────────────────────
-    agent = SACAgent(state_dim=STATE_DIM, action_dim=ACTION_DIM, gamma=GAMMA)
+    agent = SACAgent(state_dim=STATE_DIM, action_dim=ACTION_DIM, hidden_dim=128, gamma=GAMMA)
     agent.load(args.checkpoint)
     agent.actor.eval()
     agent.critic.eval()
