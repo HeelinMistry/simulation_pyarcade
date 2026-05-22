@@ -89,23 +89,30 @@ class UnifiedExecutor:
 
     # ── Core step ────────────────────────────────────────────────────────────
 
-    def step(self, indicators: np.ndarray, price: float, tick: int):
-        """
-        Execute one market tick.
+    def step(self, indicators, price, tick, epsilon=0.0):
+        state = self.get_state(indicators, price)
 
-        Returns
-        -------
-        action : int   0=LONG 1=SHORT 2=CLOSE 3=HOLD
-        probs  : np.ndarray (4,)
-        reward : float  realised P/L this tick (0 if no close event)
-        state  : np.ndarray the current state vector
-        """
-        self.tick = tick
-        state     = self.get_state(indicators, price) # State is computed here and returned
+        # 🚨 HARD STOP-LOSS CIRCUIT BREAKER 🚨
+        # If an open position triggers a 2% adverse move, bypass the policy
+        # and force an emergency CLOSE to protect against tail-risk.
+        if self.current_side is not None:
+            u_pnl = self.portfolio_info(price)["unrealized_pnl"]
+            if u_pnl <= -0.02:  # 2% or worse adverse move
+                action = 2  # force CLOSE
+                probs = np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float32)
+                self.last_probs = probs
+                reward = self._execute(action, price)
+                self.total_reward += reward
+                return action, probs, reward, state
 
-        action, probs = self.agent.select_action(state, deterministic=self.deterministic)
+        # If stop-loss isn't triggered, proceed with normal agent selection
+        if not self.deterministic and epsilon > 0 and np.random.random() < epsilon:
+            action = np.random.randint(0, 4)  # forced random action
+            _, probs = self.agent.select_action(state, deterministic=False)
+        else:
+            action, probs = self.agent.select_action(state, deterministic=self.deterministic)
+
         self.last_probs = probs
-
         reward = self._execute(action, price)
         self.total_reward += reward
         return action, probs, reward, state

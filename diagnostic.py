@@ -41,8 +41,8 @@ and whether those decisions are the best achievable given the learned Q-values.
              per cell. Visualises the policy's learned market intuition.
 
   Section 7  Regime Analysis
-             Split ticks into market regimes (trending up, trending down,
-             ranging) based on MeanDev and ATR. Check if the policy adapts.
+             Classifies each tick into a regime based on MeanDev (trend) and ATR
+             (volatility), then compares action distributions and conviction per regime.
 
   Section 8  Timing Analysis
              Average conviction and win rate by hour-of-day and day-of-week.
@@ -264,10 +264,12 @@ def collect_episode(agent: SACAgent, df: pd.DataFrame, label: str) -> dict:
     timestamps = None
     if "Open_time" in df.columns:
         try:
-            ts = pd.to_datetime(df["Open_time"].values[WARMUP_IDX + 1:])
-            timestamps = ts
-        except Exception:
-            pass
+            ts = pd.to_datetime(df["Open_time"].iloc[WARMUP_IDX + 1:], errors='coerce')
+            timestamps = ts.tolist()  # or keep as series depending on downstream requirements
+
+        except Exception as e:
+            print(f"⚠ Warning: Timestamp parsing failed during diagnostics collection: {e}")
+            timestamps = None
 
     return {
         "label":          label,
@@ -1150,33 +1152,59 @@ def plot_action_consistency(ep: dict):
     fig, axes = make_fig(2, 3, "Section 10 — Action vs Market Context Consistency")
     with plt.rc_context(STYLE):
         feat_labels = FEATURES
-        long_mask  = ep["actions"] == 0
-        short_mask = ep["actions"] == 1
-        hold_mask  = ep["actions"] == 3
+        
+        action_masks = {
+            "LONG":  ep["actions"] == 0,
+            "SHORT": ep["actions"] == 1,
+            "HOLD":  ep["actions"] == 3
+        }
+        action_colors = {
+            "LONG":  ACTION_COLORS[0],
+            "SHORT": ACTION_COLORS[1],
+            "HOLD":  ACTION_COLORS[3]
+        }
 
         # Violin plots: each feature distribution per action
         for fi, fname in enumerate(feat_labels):
             ax = axes[fi // 3][fi % 3]
-            data   = [ep["raw_features"][long_mask,  fi],
-                      ep["raw_features"][short_mask, fi],
-                      ep["raw_features"][hold_mask,  fi]]
-            labels = [f"LONG\n(n={long_mask.sum():,})",
-                      f"SHORT\n(n={short_mask.sum():,})",
-                      f"HOLD\n(n={hold_mask.sum():,})"]
-            parts = ax.violinplot(data, positions=[0, 1, 2],
-                                  showmedians=True, showextrema=False)
-            for pc, col in zip(parts["bodies"],
-                               [ACTION_COLORS[0], ACTION_COLORS[1], ACTION_COLORS[3]]):
-                pc.set_facecolor(col)
-                pc.set_alpha(0.6)
-            parts["cmedians"].set_color("white")
+            
+            plot_data = []
+            plot_labels = []
+            plot_positions = []
+            plot_colors = []
+            
+            current_position = 0
+            for action_name in ["LONG", "SHORT", "HOLD"]:
+                mask = action_masks[action_name]
+                if mask.sum() > 0:  # Only add data if there are samples for this action
+                    plot_data.append(ep["raw_features"][mask, fi])
+                    plot_labels.append(f"{action_name}\n(n={mask.sum():,})")
+                    plot_positions.append(current_position)
+                    plot_colors.append(action_colors[action_name])
+                    current_position += 1
 
-            ax.axhline(0, color="#aaaacc", lw=0.8, linestyle="--", alpha=0.7)
-            ax.set_xticks([0, 1, 2])
-            ax.set_xticklabels(labels, fontsize=7)
-            ax.set_title(f"{fname}")
-            ax.set_ylabel("Scaled value")
-            ax.grid(True, axis="y")
+            if plot_data: # Only plot if there is data to plot
+                parts = ax.violinplot(plot_data, positions=plot_positions,
+                                      showmedians=True, showextrema=False)
+                for pc, col in zip(parts["bodies"], plot_colors):
+                    pc.set_facecolor(col)
+                    pc.set_alpha(0.6)
+                parts["cmedians"].set_color("white")
+
+                ax.axhline(0, color="#aaaacc", lw=0.8, linestyle="--", alpha=0.7)
+                ax.set_xticks(plot_positions)
+                ax.set_xticklabels(plot_labels, fontsize=7)
+                ax.set_title(f"{fname}")
+                ax.set_ylabel("Scaled value")
+                ax.grid(True, axis="y")
+            else:
+                ax.set_title(f"{fname}\n(No data for actions)")
+                ax.set_xticks([])
+                ax.set_yticks([])
+                ax.text(0.5, 0.5, "No action data to plot", 
+                        horizontalalignment='center', verticalalignment='center', 
+                        transform=ax.transAxes, color='gray', fontsize=10)
+
 
     savefig(fig, "10_action_consistency.png")
 
@@ -1350,12 +1378,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-# Diagnose validation split (default)
-# python diagnostic.py
-
-# Diagnose training split
-# python diagnostic.py --split train
-
-# Diagnose both, with a specific checkpoint
-# python diagnostic.py --split both --checkpoint outcomes/sac_agent_best.pt

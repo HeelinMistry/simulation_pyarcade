@@ -61,7 +61,7 @@ WARMUP_IDX       = 200          # aggregator warm-up lookback rows
 PATIENCE = 10          # epochs without improvement before stopping
 WARMUP_EPOCHS = 3
 
-BUFFER_CAPACITY  = 200_000
+BUFFER_CAPACITY  = 500_000
 BATCH_SIZE       = 256
 UPDATE_EVERY     = 8            # update SAC every N environment steps
 UPDATES_PER_STEP = 1            # gradient steps per update call
@@ -107,7 +107,7 @@ def get_unrealized(state: np.ndarray) -> float:
 
 def run_epoch(executor: UnifiedExecutor, df: pd.DataFrame,
               replay_buffer: ReplayBuffer, agent: SACAgent,
-              train: bool = True) -> dict:
+              train: bool = True, epsilon=0.0) -> dict:
     """
     Single pass through df.
     If train=True: push to buffer and call agent.update().
@@ -141,8 +141,9 @@ def run_epoch(executor: UnifiedExecutor, df: pd.DataFrame,
         indicators = indicators_arr[i]
         price = prices_arr[i]
 
-        action, probs, realised_pnl, s_t = executor.step(indicators, price, tick=i)
-        # s_t = state actor used = market features at tick i + pre-execute portfolio
+        action, probs, realised_pnl, s_t = executor.step(
+            indicators, price, tick=i, epsilon=epsilon
+        )        # s_t = state actor used = market features at tick i + pre-execute portfolio
 
         curr_unrealized = get_unrealized(s_t)
         action_counts[action] += 1
@@ -221,16 +222,18 @@ def main():
     no_improve = 0
 
     # ── Training loop ────────────────────────────────────────────────────────
+    EPSILON_START = 0.10  # 10% random actions in epoch 1
+    EPSILON_END = 0.01  # 1% random actions by epoch 20
+    EPSILON_DECAY = (EPSILON_END / EPSILON_START) ** (1 / 20)
+
+    epsilon = EPSILON_START
     for epoch in range(1, NUM_EPOCHS + 1):
         t0 = time.time()
-        print(f"\n{'═'*60}")
-        print(f"  Epoch {epoch}/{NUM_EPOCHS}  |  buffer={len(replay_buffer):,}")
-        print(f"{'═'*60}")
-
-        # Training pass
         train_metrics = run_epoch(
-            train_executor, train_df, replay_buffer, agent, train=True
+            train_executor, train_df, replay_buffer, agent,
+            train=True, epsilon=epsilon
         )
+        epsilon = max(EPSILON_END, epsilon * EPSILON_DECAY)
 
         # Validation pass (no updates, deterministic policy)
         val_metrics = run_epoch(
