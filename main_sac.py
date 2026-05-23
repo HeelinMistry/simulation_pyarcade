@@ -292,3 +292,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# copy outcomes\sac_agent_best.pt outcomes\sac_agent.pt
+# del outcomes\sac_agent_buffer.pkl
