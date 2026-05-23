@@ -78,7 +78,7 @@ class SACAgent:
         # For |A|=4:  0.98 * ln(4) ≈ 1.355 nats  ≈ 1.96 bits
         # log_alpha is the learnable scalar; alpha = exp(log_alpha) is always +.
         if target_entropy is None:
-            self.target_entropy = 0.7 * np.log(action_dim)
+            self.target_entropy = 0.5 * np.log(action_dim)
         else:
             self.target_entropy = float(target_entropy)
 
@@ -128,8 +128,6 @@ class SACAgent:
         R  = torch.FloatTensor(rewards).unsqueeze(1).to(self.device)
         S_ = torch.FloatTensor(next_states).to(self.device)
         D  = torch.FloatTensor(dones).unsqueeze(1).to(self.device)
-
-        R = R / (R.std() + 1e-8)
 
         # ── ① Critic update ─────────────────────────────────────────────────
         with torch.no_grad():
@@ -194,7 +192,7 @@ class SACAgent:
         alpha_loss.backward()
         self.alpha_opt.step()
         with torch.no_grad():
-            self.log_alpha.clamp_(min=-2.0)
+            self.log_alpha.clamp_(min=-4.0, max=2.0)
 
         # ── ④ Soft target update ─────────────────────────────────────────────
         # θ_target ← τ·θ + (1-τ)·θ_target
@@ -238,9 +236,9 @@ class SACAgent:
             print(f"[SACAgent] ⚠️  No checkpoint at {path} — starting fresh.")
             return
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
-        self.actor.load_state_dict(ckpt["actor"], strict=False)
-        self.critic.load_state_dict(ckpt["critic"], strict=False)
-        self.critic_target.load_state_dict(ckpt["critic_target"], strict=False)
+        self.actor.load_state_dict(ckpt["actor"])
+        self.critic.load_state_dict(ckpt["critic"])
+        self.critic_target.load_state_dict(ckpt["critic_target"])
         self.log_alpha.data    = ckpt["log_alpha"].to(self.device)
         self.actor_opt.load_state_dict(ckpt["actor_opt"])
         self.critic_opt.load_state_dict(ckpt["critic_opt"])

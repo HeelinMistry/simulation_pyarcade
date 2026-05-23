@@ -82,18 +82,23 @@ SAVE_EVERY_EPOCH = 5
 # ─────────────────────────────────────────────
 
 # main_sac.py compute_shaped_reward
-HOLDING_COST   = 0.0001   # flat per-tick cost while in any position
 STOP_LOSS_COST = 0.05
+INVALID_ACTION_PENALTY = -0.0005
 
-def compute_shaped_reward(realised_pnl, prev_unrealized, curr_unrealized, is_holding):
+def compute_shaped_reward(realised_pnl, prev_unrealized, curr_unrealized,
+                          is_holding, is_invalid_close):
     unrealized_delta = curr_unrealized - prev_unrealized
     shaped = realised_pnl + SHAPING_COEFF * unrealized_delta
-    if is_holding:
-        shaped -= HOLDING_COST
-        # Escalating penalty when unrealized loss exceeds 1%
-        # Makes holding a deep loser increasingly expensive
-        if curr_unrealized < -0.01:
-            shaped -= HOLDING_COST * abs(curr_unrealized) * 10
+
+    # Penalize closing when flat — discourages the 52% useless-CLOSE behavior
+    if is_invalid_close:
+        shaped += INVALID_ACTION_PENALTY
+
+    # Keep a mild escalating penalty for deep losses (2%+), but remove the
+    # flat per-tick cost that was forcing immediate exits
+    if curr_unrealized < -0.02:
+        shaped -= 0.0002 * abs(curr_unrealized) * 10
+
     return shaped
 
 
@@ -153,16 +158,19 @@ def run_epoch(executor: UnifiedExecutor, df: pd.DataFrame,
             n_trades += 1
             prev_unrealized = 0.0
 
+        was_flat_before = (executor.current_side is None and action == 2 and realised_pnl == 0.0)
+
         reward = compute_shaped_reward(
             realised_pnl, prev_unrealized, curr_unrealized,
-            is_holding=(executor.current_side is not None and realised_pnl == 0.0)
+            is_holding=(executor.current_side is not None and realised_pnl == 0.0),
+            is_invalid_close=was_flat_before,
         )
         prev_unrealized = curr_unrealized if executor.current_side else 0.0
         done = (i == n - 1)
 
         if train and prev_action is not None:
             # Transition: agent was in prev_state, took prev_action, got prev_reward, landed in s_t
-            replay_buffer.push(prev_state, prev_action, prev_reward, s_t, prev_done)
+            replay_buffer.push(prev_state, prev_action, prev_reward, s_t, done)
             if (i % UPDATE_EVERY == 0) and replay_buffer.is_ready(BATCH_SIZE):
                 for _ in range(UPDATES_PER_STEP):
                     agent.update(replay_buffer, batch_size=BATCH_SIZE)

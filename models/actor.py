@@ -22,7 +22,7 @@ ACTION_NAMES = {0: "LONG", 1: "SHORT", 2: "CLOSE", 3: "HOLD"}
 
 
 class Actor(nn.Module):
-    def __init__(self, state_dim: int = 92, hidden_dim: int = 256, action_dim: int = 4):
+    def __init__(self, state_dim: int = 50, hidden_dim: int = 128, action_dim: int = 4):
         super().__init__()
         self.action_dim = action_dim
 
