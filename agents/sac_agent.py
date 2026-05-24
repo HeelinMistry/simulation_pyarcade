@@ -78,7 +78,7 @@ class SACAgent:
         # For |A|=4:  0.98 * ln(4) ≈ 1.355 nats  ≈ 1.96 bits
         # log_alpha is the learnable scalar; alpha = exp(log_alpha) is always +.
         if target_entropy is None:
-            self.target_entropy = 0.5 * np.log(action_dim)
+            self.target_entropy = 0.98 * np.log(action_dim)
         else:
             self.target_entropy = float(target_entropy)
 
@@ -247,9 +247,6 @@ class SACAgent:
         self.target_entropy    = ckpt.get("target_entropy", self.target_entropy)
         print(f"[SACAgent] ✅ Loaded ← {path}  "
               f"(step {self.training_steps}  α={self.last_alpha:.4f})")
-
-        self.log_alpha.data.fill_(0.0)  # reset α to 1.0 in exp-space, but now with lower target it will quickly drop
-        print(f"[SACAgent] log_alpha reset to 0.0 for fresh entropy tuning")
 
         if replay_buffer is not None:
             buffer_path = path.replace(".pt", "_buffer.pkl")

@@ -82,8 +82,8 @@ SAVE_EVERY_EPOCH = 5
 # ─────────────────────────────────────────────
 
 # main_sac.py compute_shaped_reward
-STOP_LOSS_COST = 0.05
-INVALID_ACTION_PENALTY = -0.0005
+STOP_LOSS_COST = 5.0
+INVALID_ACTION_PENALTY = -0.05
 
 def compute_shaped_reward(realised_pnl, prev_unrealized, curr_unrealized,
                           is_holding, is_invalid_close):
@@ -140,7 +140,7 @@ def run_epoch(executor: UnifiedExecutor, df: pd.DataFrame,
     # Initialize for the first iteration
     # Before loop:
     prev_state = executor.aggregator.get_state(executor.portfolio_info(prices_arr[WARMUP_IDX]))
-    prev_action, prev_reward, prev_done = None, 0.0, False
+    prev_action, prev_reward_scaled, prev_done = None, 0.0, False
 
     for i in range(WARMUP_IDX + 1, n):
         indicators = indicators_arr[i]
@@ -165,12 +165,13 @@ def run_epoch(executor: UnifiedExecutor, df: pd.DataFrame,
             is_holding=(executor.current_side is not None and realised_pnl == 0.0),
             is_invalid_close=was_flat_before,
         )
+        reward_scaled = reward * 100.0
         prev_unrealized = curr_unrealized if executor.current_side else 0.0
         done = (i == n - 1)
 
         if train and prev_action is not None:
             # Transition: agent was in prev_state, took prev_action, got prev_reward, landed in s_t
-            replay_buffer.push(prev_state, prev_action, prev_reward, s_t, done)
+            replay_buffer.push(prev_state, prev_action, prev_reward_scaled, s_t, done)
             if (i % UPDATE_EVERY == 0) and replay_buffer.is_ready(BATCH_SIZE):
                 for _ in range(UPDATES_PER_STEP):
                     agent.update(replay_buffer, batch_size=BATCH_SIZE)
@@ -178,7 +179,7 @@ def run_epoch(executor: UnifiedExecutor, df: pd.DataFrame,
 
         prev_state = s_t
         prev_action = action
-        prev_reward = reward
+        prev_reward_scaled = reward_scaled
         prev_done = done
 
         # ── Console heartbeat ────────────────────────────────────────────────
