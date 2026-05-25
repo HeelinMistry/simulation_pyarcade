@@ -192,7 +192,7 @@ class SACAgent:
         alpha_loss.backward()
         self.alpha_opt.step()
         with torch.no_grad():
-            self.log_alpha.clamp_(min=-4.0, max=2.0)
+            self.log_alpha.clamp_(min=-2.0, max=2.0)
 
         # ── ④ Soft target update ─────────────────────────────────────────────
         # θ_target ← τ·θ + (1-τ)·θ_target

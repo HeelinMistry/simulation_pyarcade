@@ -58,7 +58,7 @@ NUM_EPOCHS       = 200
 TRAIN_SPLIT      = 0.8          # first 80% for training, last 20% for val
 WARMUP_IDX       = 200          # aggregator warm-up lookback rows
 
-PATIENCE = 10          # epochs without improvement before stopping
+PATIENCE = 5          # epochs without improvement before stopping
 WARMUP_EPOCHS = 3
 
 BUFFER_CAPACITY  = 500_000
@@ -81,25 +81,27 @@ SAVE_EVERY_EPOCH = 5
 # Helpers
 # ─────────────────────────────────────────────
 
-# main_sac.py compute_shaped_reward
-STOP_LOSS_COST = 5.0
-INVALID_ACTION_PENALTY = -0.05
+# Remove reward_scaled entirely — keep reward in fraction units
+INVALID_ACTION_PENALTY  = -0.003    # was -0.0005; stronger flat-CLOSE deterrent
+MICRO_HOLD_COST         = 0.000005  # 0.5 bp/tick when in position — variance only
+EPSILON_START           = 0.05      # was 0.10; less noise killing SHORT
+EPSILON_END             = 0.005     # was 0.01
 
 def compute_shaped_reward(realised_pnl, prev_unrealized, curr_unrealized,
-                          is_holding, is_invalid_close):
+                          is_holding, is_invalid_close, in_position):
     unrealized_delta = curr_unrealized - prev_unrealized
     shaped = realised_pnl + SHAPING_COEFF * unrealized_delta
 
-    # Penalize closing when flat — discourages the 52% useless-CLOSE behavior
     if is_invalid_close:
         shaped += INVALID_ACTION_PENALTY
 
-    # Keep a mild escalating penalty for deep losses (2%+), but remove the
-    # flat per-tick cost that was forcing immediate exits
+    if in_position and is_holding:
+        shaped -= MICRO_HOLD_COST          # tiny per-tick cost, keeps variance alive
+
     if curr_unrealized < -0.02:
         shaped -= 0.0002 * abs(curr_unrealized) * 10
 
-    return shaped
+    return shaped   # NO ×100 — stay in fraction units
 
 
 def get_unrealized(state: np.ndarray) -> float:
@@ -164,7 +166,9 @@ def run_epoch(executor: UnifiedExecutor, df: pd.DataFrame,
             realised_pnl, prev_unrealized, curr_unrealized,
             is_holding=(executor.current_side is not None and realised_pnl == 0.0),
             is_invalid_close=was_flat_before,
+            in_position=(executor.current_side is not None),
         )
+
         reward_scaled = reward * 100.0
         prev_unrealized = curr_unrealized if executor.current_side else 0.0
         done = (i == n - 1)

@@ -19,6 +19,7 @@ import numpy as np
 import random
 from collections import deque
 
+SIGNAL_THRESHOLD = 0.0005  # |reward| > 0.05% is a "signal" transition
 
 class ReplayBuffer:
     def __init__(self, capacity: int = 200_000):
@@ -42,30 +43,21 @@ class ReplayBuffer:
         ))
 
     def sample(self, batch_size: int):
-        """
-        Sample with soft action balancing — prevents one action from
-        dominating the batch and causing one-sided Q-value collapse.
-        Each action gets at most 40% of the batch; remainder filled randomly.
-        """
         if len(self.buffer) < batch_size:
             raise ValueError(f"Buffer too small: {len(self.buffer)} < {batch_size}")
 
-        by_action = {a: [] for a in range(4)}
-        for t in self.buffer:
-            by_action[t[1]].append(t)  # t[1] is the action
+        signal = [t for t in self.buffer if abs(t[2]) > SIGNAL_THRESHOLD]
+        noise = [t for t in self.buffer if abs(t[2]) <= SIGNAL_THRESHOLD]
 
-        max_per_action = int(batch_size * 0.40)
+        n_signal = min(len(signal), batch_size // 2)
+        n_noise = batch_size - n_signal
+
         selected = []
-        for a in range(4):
-            pool = by_action[a]
-            n = min(len(pool), max_per_action)
-            if n > 0:
-                selected.extend(random.sample(pool, n))
-
-        # Pad to batch_size with fully random samples if needed
-        remaining = batch_size - len(selected)
-        if remaining > 0:
-            selected.extend(random.sample(list(self.buffer), remaining))
+        if n_signal > 0:
+            selected.extend(random.sample(signal, n_signal))
+        if n_noise > 0:
+            pool = noise if len(noise) >= n_noise else list(self.buffer)
+            selected.extend(random.sample(pool, n_noise))
 
         random.shuffle(selected)
         states, actions, rewards, next_states, dones = zip(*selected[:batch_size])
