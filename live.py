@@ -51,7 +51,7 @@ CANDLE_INTERVAL  = "15m"
 CANDLE_SECONDS   = 15 * 60          # 900 s per candle
 
 WARMUP_CANDLES   = 1_000            # candles fetched for indicator warm-up
-WARMUP_IDX       = 200              # must match main_sac.py WARMUP_IDX
+WARMUP_IDX       = 512              # must match main_sac.py WARMUP_IDX
 
 FEATURES         = ["RSI_Scaled", "MACD_Scaled", "BB_Scaled",
                     "OBV_Scaled", "ATR_Scaled", "MeanDev_Scaled"]

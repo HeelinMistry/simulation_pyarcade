@@ -56,11 +56,11 @@ ACTION_DIM = 4
 # Training hyperparameters
 NUM_EPOCHS       = 200
 TRAIN_SPLIT      = 0.8          # first 80% for training, last 20% for val
-WARMUP_IDX       = 200          # aggregator warm-up lookback rows
+WARMUP_IDX       = 512          # aggregator warm-up lookback rows
 
-PATIENCE = 2          # epochs without improvement before stopping
-WARMUP_EPOCHS = 2
-MIN_IMPROVE   = 0.005   # val PnL must improve by 0.5pp to reset patience
+PATIENCE = 8          # epochs without improvement before stopping
+WARMUP_EPOCHS = 5
+MIN_IMPROVE   = 0.001   # val PnL must improve by 0.5pp to reset patience
 
 BUFFER_CAPACITY  = 500_000
 BATCH_SIZE       = 256

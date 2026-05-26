@@ -121,26 +121,24 @@ class UnifiedExecutor:
     # ── Execution logic ───────────────────────────────────────────────────────
 
     def _execute(self, action: int, price: float) -> float:
-        """Apply action to position, return realised P/L (0 if no close)."""
         reward = 0.0
-
-        if action == 0:
-            if self.current_side != "LONG":
+        if action == 0:  # LONG
+            if self.current_side == 'SHORT':
+                reward = self._close(price)  # close SHORT, realise the loss/gain
+            if self.current_side is None:  # now open LONG (covers both fresh + reversal)
                 self.inventory.append(price * (1 + COMMISSION))
-                self.current_side = "LONG"
-                self._entry_tick = getattr(self, 'tick', 0)  # set entry tick
-        elif action == 1:
-            if self.current_side != "SHORT":
-                self.inventory.append(price * (1 - COMMISSION))
-                self.current_side = "SHORT"
+                self.current_side = 'LONG'
                 self._entry_tick = getattr(self, 'tick', 0)
-
-        elif action == 2:  # CLOSE
+        elif action == 1:  # SHORT
+            if self.current_side == 'LONG':
+                reward = self._close(price)  # close LONG first
+            if self.current_side is None:
+                self.inventory.append(price * (1 - COMMISSION))
+                self.current_side = 'SHORT'
+                self._entry_tick = getattr(self, 'tick', 0)
+        elif action == 2:
             if self.current_side is not None:
                 reward = self._close(price)
-
-        # action == 3: HOLD — no change
-
         return reward
 
     def _close(self, price: float) -> float:
