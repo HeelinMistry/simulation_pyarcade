@@ -58,8 +58,9 @@ NUM_EPOCHS       = 200
 TRAIN_SPLIT      = 0.8          # first 80% for training, last 20% for val
 WARMUP_IDX       = 200          # aggregator warm-up lookback rows
 
-PATIENCE = 5          # epochs without improvement before stopping
-WARMUP_EPOCHS = 3
+PATIENCE = 2          # epochs without improvement before stopping
+WARMUP_EPOCHS = 2
+MIN_IMPROVE   = 0.005   # val PnL must improve by 0.5pp to reset patience
 
 BUFFER_CAPACITY  = 500_000
 BATCH_SIZE       = 256
@@ -169,13 +170,12 @@ def run_epoch(executor: UnifiedExecutor, df: pd.DataFrame,
             in_position=(executor.current_side is not None),
         )
 
-        reward_scaled = reward * 100.0
         prev_unrealized = curr_unrealized if executor.current_side else 0.0
         done = (i == n - 1)
 
         if train and prev_action is not None:
             # Transition: agent was in prev_state, took prev_action, got prev_reward, landed in s_t
-            replay_buffer.push(prev_state, prev_action, prev_reward_scaled, s_t, done)
+            replay_buffer.push(prev_state, prev_action, reward, s_t, done)
             if (i % UPDATE_EVERY == 0) and replay_buffer.is_ready(BATCH_SIZE):
                 for _ in range(UPDATES_PER_STEP):
                     agent.update(replay_buffer, batch_size=BATCH_SIZE)
@@ -183,8 +183,6 @@ def run_epoch(executor: UnifiedExecutor, df: pd.DataFrame,
 
         prev_state = s_t
         prev_action = action
-        prev_reward_scaled = reward_scaled
-        prev_done = done
 
         # ── Console heartbeat ────────────────────────────────────────────────
         if train and (i % LOG_EVERY_TICKS == 0):
@@ -275,7 +273,7 @@ def main():
         print(f"  Time  : {elapsed:.1f}s  |  updates this epoch: {train_metrics['update_count']}")
 
         # Early stopping on val PnL degradation
-        if v_pnl > best_val_pnl:
+        if v_pnl > best_val_pnl + MIN_IMPROVE:
             best_val_pnl = v_pnl
             no_improve = 0
             agent.save(BEST_PATH)

@@ -78,7 +78,7 @@ class SACAgent:
         # For |A|=4:  0.98 * ln(4) ≈ 1.355 nats  ≈ 1.96 bits
         # log_alpha is the learnable scalar; alpha = exp(log_alpha) is always +.
         if target_entropy is None:
-            self.target_entropy = 0.98 * np.log(action_dim)
+            self.target_entropy = 0.75 * np.log(action_dim)
         else:
             self.target_entropy = float(target_entropy)
 

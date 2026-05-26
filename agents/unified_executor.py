@@ -26,7 +26,7 @@ import collections
 from agents.state_aggregator import StateAggregator
 
 COMMISSION = 0.00015  # Matches training — do not change without retraining
-
+MAX_HOLD_TICKS = 96
 
 class UnifiedExecutor:
     """
@@ -90,15 +90,16 @@ class UnifiedExecutor:
     # ── Core step ────────────────────────────────────────────────────────────
 
     def step(self, indicators, price, tick, epsilon=0.0):
+        self.tick = tick
         state = self.get_state(indicators, price)
 
-        # 🚨 HARD STOP-LOSS CIRCUIT BREAKER 🚨
-        # If an open position triggers a 2% adverse move, bypass the policy
-        # and force an emergency CLOSE to protect against tail-risk.
         if self.current_side is not None:
             u_pnl = self.portfolio_info(price)["unrealized_pnl"]
-            if u_pnl <= -0.02:  # 2% or worse adverse move
-                action = 2  # force CLOSE
+            hold_duration = tick - self._entry_tick if hasattr(self, '_entry_tick') else 0
+
+            # Stop-loss OR max duration — force close either way
+            if u_pnl <= -0.02 or hold_duration >= MAX_HOLD_TICKS:
+                action = 2
                 probs = np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float32)
                 self.last_probs = probs
                 reward = self._execute(action, price)
@@ -123,21 +124,16 @@ class UnifiedExecutor:
         """Apply action to position, return realised P/L (0 if no close)."""
         reward = 0.0
 
-        if action == 0:  # LONG
-            if self.current_side == "SHORT":
-                reward = self._close(price)
-                reward -= COMMISSION  # expose the new entry cost upfront
+        if action == 0:
             if self.current_side != "LONG":
                 self.inventory.append(price * (1 + COMMISSION))
                 self.current_side = "LONG"
-
-        elif action == 1:  # SHORT
-            if self.current_side == "LONG":
-                reward = self._close(price)
-                reward -= COMMISSION  # expose the new entry cost upfront
+                self._entry_tick = getattr(self, 'tick', 0)  # set entry tick
+        elif action == 1:
             if self.current_side != "SHORT":
                 self.inventory.append(price * (1 - COMMISSION))
                 self.current_side = "SHORT"
+                self._entry_tick = getattr(self, 'tick', 0)
 
         elif action == 2:  # CLOSE
             if self.current_side is not None:

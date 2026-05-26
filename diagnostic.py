@@ -1296,6 +1296,15 @@ def write_summary(ep: dict, agent: SACAgent, pnls):
         lines.append(f"  Conviction edge (WR delta):  {edge:+.1%}")
         lines.append(f"  → {'Conviction is predictive ✓' if edge > 0.03 else 'Conviction not yet predictive — policy may need more training'}")
 
+        if trades and wins.mean() > 0.80:
+            lines.append("\n⚠ WARNING: Win rate >80% strongly suggests regime overfitting.")
+            lines.append("  Validate on a bear market period before trusting these results.")
+        if len(trades) > 0:
+            ann_sharpe = pnl_arr.mean() / (pnl_arr.std() + 1e-9) * np.sqrt(252 * 4)  # 4 trades/day
+            lines.append(f"  Annualized Sharpe (realistic): {ann_sharpe:.2f}")
+            if ann_sharpe > 5:
+                lines.append("  ⚠ Sharpe >5 is implausible — check for data leakage or regime bias.")
+
     lines.append("\n" + "=" * 62)
     text = "\n".join(lines)
 
