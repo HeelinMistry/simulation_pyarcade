@@ -26,7 +26,7 @@ import collections
 from agents.state_aggregator import StateAggregator
 
 COMMISSION = 0.00015  # Matches training — do not change without retraining
-MAX_HOLD_TICKS = 96
+MAX_HOLD_TICKS = 32
 
 class UnifiedExecutor:
     """

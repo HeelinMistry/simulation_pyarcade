@@ -93,6 +93,9 @@ def compute_shaped_reward(realised_pnl, prev_unrealized, curr_unrealized,
     unrealized_delta = curr_unrealized - prev_unrealized
     shaped = realised_pnl + SHAPING_COEFF * unrealized_delta
 
+    if realised_pnl > 0.001:  # profitable close (>0.1%)
+        shaped += realised_pnl * 0.1
+
     if is_invalid_close:
         shaped += INVALID_ACTION_PENALTY
 
@@ -144,6 +147,7 @@ def run_epoch(executor: UnifiedExecutor, df: pd.DataFrame,
     # Before loop:
     prev_state = executor.aggregator.get_state(executor.portfolio_info(prices_arr[WARMUP_IDX]))
     prev_action, prev_reward_scaled, prev_done = None, 0.0, False
+    prev_reward = 0.0
 
     for i in range(WARMUP_IDX + 1, n):
         indicators = indicators_arr[i]
@@ -175,7 +179,7 @@ def run_epoch(executor: UnifiedExecutor, df: pd.DataFrame,
 
         if train and prev_action is not None:
             # Transition: agent was in prev_state, took prev_action, got prev_reward, landed in s_t
-            replay_buffer.push(prev_state, prev_action, reward, s_t, done)
+            replay_buffer.push(prev_state, prev_action, prev_reward, s_t, done)
             if (i % UPDATE_EVERY == 0) and replay_buffer.is_ready(BATCH_SIZE):
                 for _ in range(UPDATES_PER_STEP):
                     agent.update(replay_buffer, batch_size=BATCH_SIZE)
@@ -183,6 +187,7 @@ def run_epoch(executor: UnifiedExecutor, df: pd.DataFrame,
 
         prev_state = s_t
         prev_action = action
+        prev_reward = reward
 
         # ── Console heartbeat ────────────────────────────────────────────────
         if train and (i % LOG_EVERY_TICKS == 0):
