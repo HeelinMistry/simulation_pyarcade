@@ -1387,3 +1387,30 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# Add to diagnostic.py or run standalone:
+import numpy as np, pandas as pd
+from data.data_manager import update_master_data
+
+df = update_master_data()
+split = int(len(df) * 0.8)
+val_df = df.iloc[split:].reset_index(drop=True)
+prices = val_df['Close'].values
+COMMISSION = 0.00015
+
+n_trials, n_trades = 1000, 500
+pnls = []
+for _ in range(n_trials):
+    pnl = 0.0
+    for _ in range(n_trades):
+        entry_idx = np.random.randint(0, len(prices) - 33)
+        hold = np.random.randint(1, 33)
+        side = np.random.choice([-1, 1])
+        entry = prices[entry_idx] * (1 + side * COMMISSION)
+        exit_ = prices[entry_idx + hold] * (1 - side * COMMISSION)
+        pnl += side * (exit_ - entry) / entry
+    pnls.append(pnl)
+
+print(f"Random policy: mean={np.mean(pnls):.4%}  "
+      f"std={np.std(pnls):.4%}  "
+      f"win_rate={(np.array(pnls) > 0).mean():.1%}")

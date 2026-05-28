@@ -83,29 +83,21 @@ SAVE_EVERY_EPOCH = 5
 # ─────────────────────────────────────────────
 
 # Remove reward_scaled entirely — keep reward in fraction units
-INVALID_ACTION_PENALTY  = -0.003    # was -0.0005; stronger flat-CLOSE deterrent
 MICRO_HOLD_COST         = 0.000005  # 0.5 bp/tick when in position — variance only
 EPSILON_START           = 0.05      # was 0.10; less noise killing SHORT
 EPSILON_END             = 0.005     # was 0.01
 
-def compute_shaped_reward(realised_pnl, prev_unrealized, curr_unrealized,
+def compute_shaped_reward(realised_pnl,
                           is_holding, is_invalid_close, in_position):
-    unrealized_delta = curr_unrealized - prev_unrealized
-    shaped = realised_pnl + SHAPING_COEFF * unrealized_delta
+    shaped = realised_pnl
 
-    if realised_pnl > 0.001:  # profitable close (>0.1%)
+    if realised_pnl > 0.001:  # profitable close bonus
         shaped += realised_pnl * 0.1
 
-    if is_invalid_close:
-        shaped += INVALID_ACTION_PENALTY
-
     if in_position and is_holding:
-        shaped -= MICRO_HOLD_COST          # tiny per-tick cost, keeps variance alive
+        shaped -= MICRO_HOLD_COST  # -0.000005/tick, variance only
 
-    if curr_unrealized < -0.02:
-        shaped -= 0.0002 * abs(curr_unrealized) * 10
-
-    return shaped   # NO ×100 — stay in fraction units
+    return shaped
 
 
 def get_unrealized(state: np.ndarray) -> float:
@@ -142,6 +134,7 @@ def run_epoch(executor: UnifiedExecutor, df: pd.DataFrame,
     action_counts    = [0, 0, 0, 0]
     update_count     = 0
     prev_unrealized  = 0.0
+    debug_count  = 0
 
     # Initialize for the first iteration
     # Before loop:
@@ -168,7 +161,7 @@ def run_epoch(executor: UnifiedExecutor, df: pd.DataFrame,
         was_flat_before = (executor.current_side is None and action == 2 and realised_pnl == 0.0)
 
         reward = compute_shaped_reward(
-            realised_pnl, prev_unrealized, curr_unrealized,
+            realised_pnl,
             is_holding=(executor.current_side is not None and realised_pnl == 0.0),
             is_invalid_close=was_flat_before,
             in_position=(executor.current_side is not None),
@@ -178,7 +171,10 @@ def run_epoch(executor: UnifiedExecutor, df: pd.DataFrame,
         done = (i == n - 1)
 
         if train and prev_action is not None:
-            # Transition: agent was in prev_state, took prev_action, got prev_reward, landed in s_t
+            if prev_action == 2 and debug_count < 5:  # CLOSE action
+                print(f"  [DEBUG] CLOSE transition: reward={prev_reward:.6f}, "
+                      f"prev_state_pos={prev_state[-2]:.1f}, s_t_pos={s_t[-2]:.1f}")
+                debug_count += 1
             replay_buffer.push(prev_state, prev_action, prev_reward, s_t, done)
             if (i % UPDATE_EVERY == 0) and replay_buffer.is_ready(BATCH_SIZE):
                 for _ in range(UPDATES_PER_STEP):

@@ -21,6 +21,7 @@ Conviction filter note:
   during training or it corrupts the reward signal.
 """
 
+import torch
 import numpy as np
 import collections
 from agents.state_aggregator import StateAggregator
@@ -89,6 +90,12 @@ class UnifiedExecutor:
 
     # ── Core step ────────────────────────────────────────────────────────────
 
+    def _get_action_mask(self) -> torch.Tensor:
+        if self.current_side is None:
+            return torch.tensor([True, True, False, True])  # flat: no CLOSE
+        else:
+            return torch.tensor([False, False, True, True])  # in-pos: CLOSE or HOLD
+
     def step(self, indicators, price, tick, epsilon=0.0):
         self.tick = tick
         state = self.get_state(indicators, price)
@@ -96,8 +103,6 @@ class UnifiedExecutor:
         if self.current_side is not None:
             u_pnl = self.portfolio_info(price)["unrealized_pnl"]
             hold_duration = tick - self._entry_tick if hasattr(self, '_entry_tick') else 0
-
-            # Stop-loss OR max duration — force close either way
             if u_pnl <= -0.02 or hold_duration >= MAX_HOLD_TICKS:
                 action = 2
                 probs = np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float32)
@@ -106,12 +111,16 @@ class UnifiedExecutor:
                 self.total_reward += reward
                 return action, probs, reward, state
 
-        # If stop-loss isn't triggered, proceed with normal agent selection
+        mask = self._get_action_mask()
+
         if not self.deterministic and epsilon > 0 and np.random.random() < epsilon:
-            action = np.random.randint(0, 4)  # forced random action
+            valid_actions = mask.nonzero().squeeze(-1).tolist()
+            action = np.random.choice(valid_actions)
             _, probs = self.agent.select_action(state, deterministic=False)
         else:
-            action, probs = self.agent.select_action(state, deterministic=self.deterministic)
+            action, probs = self.agent.select_action(
+                state, deterministic=self.deterministic, action_mask=mask
+            )
 
         self.last_probs = probs
         reward = self._execute(action, price)
