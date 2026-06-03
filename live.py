@@ -9,8 +9,8 @@ Two modes (selected by --mode flag):
              price chart, LONG/SHORT/CLOSE signals, probability bars,
              PnL curve, and entropy. Saves a PNG at end.
 
-  live       Fetch the same warm-up history, then poll Binance every 15
-             minutes for the next closed candle, run one inference step,
+  live       Fetch the same warm-up history, then poll Binance every 4
+             hours for the next closed candle, run one inference step,
              log the action and probabilities, and update the display.
              No orders are placed — observation only.
 
@@ -47,16 +47,16 @@ from data.preprocessing      import preprocess_indicators_data
 # ─────────────────────────────────────────────────────────────────────────────
 
 BINANCE_API_URL  = "https://api.binance.com/api/"
-CANDLE_INTERVAL  = "15m"
-CANDLE_SECONDS   = 15 * 60          # 900 s per candle
+CANDLE_INTERVAL  = "4h"
+CANDLE_SECONDS   = 4 * 60 * 60      # 14 400 s per candle
 
-WARMUP_CANDLES   = 1_000            # candles fetched for indicator warm-up
-WARMUP_IDX       = 512              # must match main_sac.py WARMUP_IDX
+WARMUP_CANDLES   = 600              # 600 × 4 h ≈ 100 days — satisfies rolling(200)
+WARMUP_IDX       = 720              # must match main_sac.py WARMUP_IDX
 
 FEATURES         = ["RSI_Scaled", "MACD_Scaled", "BB_Scaled",
                     "OBV_Scaled", "ATR_Scaled", "MeanDev_Scaled"]
 NUM_INDICATORS   = len(FEATURES)
-PACES     = (1, 4, 16, 64)
+PACES     = (1, 6, 42, 90)
 STATE_DIM = (NUM_INDICATORS * 2 * len(PACES)) + 2
 ACTION_DIM       = 4
 ACTION_NAMES     = {0: "LONG", 1: "SHORT", 2: "CLOSE", 3: "HOLD"}
@@ -183,7 +183,7 @@ class LiveWindow(arcade.Window):
         symbol:       str,
         mode:         str = "backtest",      # "backtest" | "live"
     ):
-        title = f"SAC {'Backtest' if mode == 'backtest' else 'LIVE'}  —  {symbol}  15m"
+        title = f"SAC {'Backtest' if mode == 'backtest' else 'LIVE'}  —  {symbol}  4h"
         super().__init__(WIN_W, WIN_H, title, update_rate=1 / 60)
 
         self.df       = df
@@ -482,11 +482,12 @@ class LiveWindow(arcade.Window):
             ts = str(self.df.iloc[safe]["Open_time"])[:16]
             row("Time",  ts,                                           WIN_H - 220)
 
-        # Live-mode: countdown to next candle
+        # Live-mode: countdown to next candle (4 h interval — show hrs:mins)
         if self.mode == "live":
             remaining = max(0, self._next_candle_ts - time.time())
-            mins, secs = divmod(int(remaining), 60)
-            row("Next candle", f"{mins:02d}:{secs:02d}",              WIN_H - 244, C_PURPLE)
+            hrs, rem  = divmod(int(remaining), 3600)
+            mins      = rem // 60
+            row("Next candle", f"{hrs:02d}h {mins:02d}m",              WIN_H - 244, C_PURPLE)
 
     def _draw_prob_bars(self):
         """Horizontal probability bars on the right panel."""

@@ -159,7 +159,6 @@ class SACAgent:
             ).sum(dim=1, keepdim=True)                             # (B, 1)
 
             td_target = R + self.gamma * (1.0 - D) * soft_v_next
-            td_target = td_target.clamp(-1.0, 1.0)
 
         q1, q2     = self.critic(S)                                 # (B, 4) each
         q1_taken   = q1.gather(1, A.unsqueeze(1))                   # (B, 1)

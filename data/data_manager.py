@@ -72,10 +72,13 @@ def _log_coverage(df: pd.DataFrame, label: str) -> None:
         f"years: {years}"
     )
     gaps = ts.diff().dropna()
-    big  = gaps[gaps > pd.Timedelta(hours=1)]
+    # Threshold is 2× the modal candle spacing so normal 4 h gaps don't fire.
+    modal_gap = gaps.mode().iloc[0] if not gaps.empty else pd.Timedelta(hours=4)
+    gap_threshold = modal_gap * 2
+    big  = gaps[gaps > gap_threshold]
     if not big.empty:
         print(
-            f"  [{label}]  ⚠  {len(big)} gap(s) > 1 h — "
+            f"  [{label}]  ⚠  {len(big)} gap(s) > {gap_threshold} — "
             f"largest: {gaps.max()}.  Check for missing zips."
         )
 

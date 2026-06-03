@@ -3,6 +3,8 @@ main_sac.py
 ───────────
 Headless training loop for the SAC-Discrete agent.
 
+Candle timeframe: 4 h  (one tick = 4 hours)
+
 Epoch structure
 ───────────────
 One epoch = one full pass through the processed CSV (train split).
@@ -11,23 +13,17 @@ transitions from epoch 1 are still valid for critic updates in epoch 50.
 
 Reward design
 ─────────────
-Sparse realised P/L is used as the reward signal, with one small shaping
-term to help the critic bootstrap before any positions are closed.
+Sparse realised P/L is used as the reward signal.  A small hold cost
+penalises sitting in a position without closing it, proportional to
+tick frequency (0.5 bp / 4 h tick).
 
-  r_t = realised_pnl     if position closed this tick  (dense signal)
-      + unrealized_delta * 0.1                          (shaping: 10% weight)
-      + 0                otherwise
-
-The shaping coefficient (0.1) keeps the unrealized signal subordinate to
-actual P/L so the agent doesn't optimise for paper gains over realised ones.
-Set it to 0.0 if you want purely sparse rewards (slower but cleaner).
+  r_t = realised_pnl  if position closed this tick  (dense signal)
+      - MICRO_HOLD_COST  each tick while in position (−0.5 bp / tick)
+      + 0               otherwise
 
 Update schedule
 ───────────────
 SAC is updated every UPDATE_EVERY steps once the buffer is ready.
-Multiple updates per data step are valid and common — we use
-UPDATES_PER_STEP=2 to help the critic catch up to the fast-moving
-financial time series.
 """
 
 import time
@@ -49,32 +45,30 @@ BEST_PATH        = "outcomes/sac_agent_best.pt"
 
 FEATURES   = ["RSI_Scaled", "MACD_Scaled", "BB_Scaled",
               "OBV_Scaled", "ATR_Scaled", "MeanDev_Scaled"]
-PACES      = (1, 4, 16, 64)
+PACES      = (1, 6, 42, 90)
 STATE_DIM  = (len(FEATURES) * 2 * len(PACES)) + 2   # 50 (6 indicators * 2 features per indicator * 4 paces + 2 portfolio features)
 ACTION_DIM = 4
 
 # Training hyperparameters
-NUM_EPOCHS       = 200
+NUM_EPOCHS       = 100
 TRAIN_SPLIT      = 0.8          # first 80% for training, last 20% for val
-WARMUP_IDX       = 512          # aggregator warm-up lookback rows
+WARMUP_IDX       = 128          # aggregator warm-up rows (= max_pace × max_history)
 
-PATIENCE = 8          # epochs without improvement before stopping
-WARMUP_EPOCHS = 5
-MIN_IMPROVE   = 0.001   # val PnL must improve by 0.5pp to reset patience
+PATIENCE         = 6            # epochs without improvement before stopping
+WARMUP_EPOCHS    = 3
+MIN_IMPROVE      = 0.005        # val PnL must improve by 0.1 pp to reset patience
 
-BUFFER_CAPACITY  = 500_000
-BATCH_SIZE       = 256
+BUFFER_CAPACITY  = 30_000       # ~7 epochs of 4 h data (9 486 rows × 0.8 ≈ 7 588 / epoch)
+BATCH_SIZE       = 128
 UPDATE_EVERY     = 8            # update SAC every N environment steps
 UPDATES_PER_STEP = 1            # gradient steps per update call
 LR               = 3e-4
-GAMMA            = 0.97
+GAMMA            = 0.97         # at 4 h / tick: 0.97^6 ≈ 83 % weight over 1 day
+
 TAU              = 0.005
 
-# Reward shaping
-SHAPING_COEFF    = 0.1          # weight on unrealized PnL delta; set 0 for sparse-only
-
 # Logging
-LOG_EVERY_TICKS  = 2_000        # console print frequency within an epoch
+LOG_EVERY_TICKS  = 500          # ~14 heartbeats per epoch over ~7 000 train ticks
 SAVE_EVERY_EPOCH = 5
 
 
@@ -83,9 +77,9 @@ SAVE_EVERY_EPOCH = 5
 # ─────────────────────────────────────────────
 
 # Remove reward_scaled entirely — keep reward in fraction units
-MICRO_HOLD_COST         = 0.000005  # 0.5 bp/tick when in position — variance only
-EPSILON_START           = 0.05      # was 0.10; less noise killing SHORT
-EPSILON_END             = 0.005     # was 0.01
+MICRO_HOLD_COST = 0.000005  # 0.5 bp / tick (4 h candle) while in position
+EPSILON_START   = 0.10      # 10 % random actions in epoch 1
+EPSILON_END     = 0.01      #  1 % random actions by epoch 20
 
 def compute_shaped_reward(realised_pnl,
                           is_holding, is_invalid_close, in_position):
@@ -98,14 +92,6 @@ def compute_shaped_reward(realised_pnl,
         shaped -= MICRO_HOLD_COST  # -0.000005/tick, variance only
 
     return shaped
-
-
-def get_unrealized(state: np.ndarray) -> float:
-    """
-    Extracts unrealized P/L from the state vector.
-    Assumes unrealized P/L is the last element of the state vector.
-    """
-    return float(state[-1])
 
 
 def run_epoch(executor: UnifiedExecutor, df: pd.DataFrame,
@@ -133,24 +119,23 @@ def run_epoch(executor: UnifiedExecutor, df: pd.DataFrame,
     n_trades         = 0
     action_counts    = [0, 0, 0, 0]
     update_count     = 0
-    prev_unrealized  = 0.0
-    debug_count  = 0
 
     # Initialize for the first iteration
     # Before loop:
     prev_state = executor.aggregator.get_state(executor.portfolio_info(prices_arr[WARMUP_IDX]))
-    prev_action, prev_reward_scaled, prev_done = None, 0.0, False
+    prev_action, prev_done = None, False
     prev_reward = 0.0
 
     for i in range(WARMUP_IDX + 1, n):
         indicators = indicators_arr[i]
         price = prices_arr[i]
 
+        was_in_position = executor.current_side is not None
+
         action, probs, realised_pnl, s_t = executor.step(
             indicators, price, tick=i, epsilon=epsilon
         )        # s_t = state actor used = market features at tick i + pre-execute portfolio
 
-        curr_unrealized = get_unrealized(s_t)
         action_counts[action] += 1
 
         if realised_pnl != 0.0:
@@ -158,7 +143,7 @@ def run_epoch(executor: UnifiedExecutor, df: pd.DataFrame,
             n_trades += 1
             prev_unrealized = 0.0
 
-        was_flat_before = (executor.current_side is None and action == 2 and realised_pnl == 0.0)
+        was_flat_before = (not was_in_position and action == 2 and realised_pnl == 0.0)
 
         reward = compute_shaped_reward(
             realised_pnl,
@@ -167,14 +152,9 @@ def run_epoch(executor: UnifiedExecutor, df: pd.DataFrame,
             in_position=(executor.current_side is not None),
         )
 
-        prev_unrealized = curr_unrealized if executor.current_side else 0.0
         done = (i == n - 1)
 
         if train and prev_action is not None:
-            if prev_action == 2 and debug_count < 5:  # CLOSE action
-                print(f"  [DEBUG] CLOSE transition: reward={prev_reward:.6f}, "
-                      f"prev_state_pos={prev_state[-2]:.1f}, s_t_pos={s_t[-2]:.1f}")
-                debug_count += 1
             replay_buffer.push(prev_state, prev_action, prev_reward, s_t, done)
             if (i % UPDATE_EVERY == 0) and replay_buffer.is_ready(BATCH_SIZE):
                 for _ in range(UPDATES_PER_STEP):
@@ -220,7 +200,7 @@ def main():
     # ── Initialise components ────────────────────────────────────────────────
     agent = SACAgent(
         state_dim=STATE_DIM, action_dim=ACTION_DIM,
-        hidden_dim=128, 
+        hidden_dim=128,
         lr=LR, gamma=GAMMA, tau=TAU,
     )
     agent.load(CHECKPOINT_PATH)   # resumes if checkpoint exists
@@ -234,8 +214,7 @@ def main():
     no_improve = 0
 
     # ── Training loop ────────────────────────────────────────────────────────
-    EPSILON_START = 0.10  # 10% random actions in epoch 1
-    EPSILON_END = 0.01  # 1% random actions by epoch 20
+    # Epsilon decays from EPSILON_START → EPSILON_END over 20 epochs.
     EPSILON_DECAY = (EPSILON_END / EPSILON_START) ** (1 / 20)
 
     epsilon = EPSILON_START
@@ -285,6 +264,10 @@ def main():
         if epoch >= WARMUP_EPOCHS and no_improve >= PATIENCE:
             print(f"  ⚠ No val improvement for {PATIENCE} epochs — early stop")
             break
+
+        short_pct = t_ac[1] / max(sum(t_ac), 1)
+        if epoch > WARMUP_EPOCHS and short_pct < 0.05:
+            print(f"  ⚠ SHORT at {short_pct:.1%} in training — watch for collapse")
 
         # Periodic checkpoint
         if epoch % SAVE_EVERY_EPOCH == 0:

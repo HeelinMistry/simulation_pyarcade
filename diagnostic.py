@@ -101,13 +101,13 @@ from data.data_manager     import update_master_data
 BEST_PATH   = "outcomes/sac_agent_best.pt"
 FEATURES    = ["RSI_Scaled", "MACD_Scaled", "BB_Scaled",
                "OBV_Scaled", "ATR_Scaled", "MeanDev_Scaled"]
-PACES     = (1, 4, 16, 64)
+PACES     =  (1, 6, 42, 90)
 STATE_DIM = (len(FEATURES) * 2 * len(PACES)) + 2
 ACTION_DIM  = 4
 ACTION_NAMES = ["LONG", "SHORT", "CLOSE", "HOLD"]
 ACTION_COLORS = ["#2ecc71", "#e74c3c", "#f39c12", "#95a5a6"]
 TRAIN_SPLIT = 0.8
-WARMUP_IDX  = 512
+WARMUP_IDX  = 720
 OUT_DIR     = "outcomes/diagnostics"
 GAMMA = 0.97
 
@@ -647,7 +647,7 @@ def plot_trade_outcomes(ep: dict):
         ax.axvline(np.median(durations), color="#ffd700", lw=1.5,
                    label=f"median={np.median(durations):.0f} ticks")
         ax.set_title("Holding Duration Distribution")
-        ax.set_xlabel("Duration (ticks) — 1 tick = 15 min")
+        ax.set_xlabel("Duration (ticks) — 1 tick = 4 h")
         ax.set_ylabel("Count")
         ax.legend(fontsize=8)
         ax.grid(True)
@@ -1152,7 +1152,7 @@ def plot_action_consistency(ep: dict):
     fig, axes = make_fig(2, 3, "Section 10 — Action vs Market Context Consistency")
     with plt.rc_context(STYLE):
         feat_labels = FEATURES
-        
+
         action_masks = {
             "LONG":  ep["actions"] == 0,
             "SHORT": ep["actions"] == 1,
@@ -1167,12 +1167,12 @@ def plot_action_consistency(ep: dict):
         # Violin plots: each feature distribution per action
         for fi, fname in enumerate(feat_labels):
             ax = axes[fi // 3][fi % 3]
-            
+
             plot_data = []
             plot_labels = []
             plot_positions = []
             plot_colors = []
-            
+
             current_position = 0
             for action_name in ["LONG", "SHORT", "HOLD"]:
                 mask = action_masks[action_name]
@@ -1201,8 +1201,8 @@ def plot_action_consistency(ep: dict):
                 ax.set_title(f"{fname}\n(No data for actions)")
                 ax.set_xticks([])
                 ax.set_yticks([])
-                ax.text(0.5, 0.5, "No action data to plot", 
-                        horizontalalignment='center', verticalalignment='center', 
+                ax.text(0.5, 0.5, "No action data to plot",
+                        horizontalalignment='center', verticalalignment='center',
                         transform=ax.transAxes, color='gray', fontsize=10)
 
 
@@ -1273,7 +1273,7 @@ def write_summary(ep: dict, agent: SACAgent, pnls):
             sharpe = pnl_arr.mean() / pnl_arr.std() * np.sqrt(len(trades))
             lines.append(f"  Sharpe (simplified):         {sharpe:.3f}")
         lines.append(f"  Median hold duration:        {np.median(dur_arr):.0f} ticks "
-                     f"({np.median(dur_arr) * 15 / 60:.1f} hrs)")
+                     f"({np.median(dur_arr) * 4:.0f} hrs)")
         if longs:
             lp = np.array([t["pnl"] for t in longs])
             lines.append(f"  LONG  win rate:              {(lp > 0).mean():.1%} "
@@ -1300,7 +1300,7 @@ def write_summary(ep: dict, agent: SACAgent, pnls):
             lines.append("\n⚠ WARNING: Win rate >80% strongly suggests regime overfitting.")
             lines.append("  Validate on a bear market period before trusting these results.")
         if len(trades) > 0:
-            ann_sharpe = pnl_arr.mean() / (pnl_arr.std() + 1e-9) * np.sqrt(252 * 4)  # 4 trades/day
+            ann_sharpe = pnl_arr.mean() / (pnl_arr.std() + 1e-9) * np.sqrt(252 * 6)  # ~6 trades/day at 4 h
             lines.append(f"  Annualized Sharpe (realistic): {ann_sharpe:.2f}")
             if ann_sharpe > 5:
                 lines.append("  ⚠ Sharpe >5 is implausible — check for data leakage or regime bias.")
