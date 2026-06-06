@@ -107,7 +107,7 @@ ACTION_DIM  = 4
 ACTION_NAMES = ["LONG", "SHORT", "CLOSE", "HOLD"]
 ACTION_COLORS = ["#2ecc71", "#e74c3c", "#f39c12", "#95a5a6"]
 TRAIN_SPLIT = 0.8
-WARMUP_IDX  = 720
+WARMUP_IDX  = 128
 OUT_DIR     = "outcomes/diagnostics"
 GAMMA = 0.97
 

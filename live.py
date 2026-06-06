@@ -51,7 +51,7 @@ CANDLE_INTERVAL  = "4h"
 CANDLE_SECONDS   = 4 * 60 * 60      # 14 400 s per candle
 
 WARMUP_CANDLES   = 600              # 600 × 4 h ≈ 100 days — satisfies rolling(200)
-WARMUP_IDX       = 720              # must match main_sac.py WARMUP_IDX
+WARMUP_IDX       = 128              # must match main_sac.py WARMUP_IDX
 
 FEATURES         = ["RSI_Scaled", "MACD_Scaled", "BB_Scaled",
                     "OBV_Scaled", "ATR_Scaled", "MeanDev_Scaled"]

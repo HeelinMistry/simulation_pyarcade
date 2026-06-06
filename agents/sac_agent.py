@@ -143,22 +143,21 @@ class SACAgent:
         S_ = torch.FloatTensor(next_states).to(self.device)
         D  = torch.FloatTensor(dones).unsqueeze(1).to(self.device)
 
-        # ── ① Critic update ─────────────────────────────────────────────────
+        # ── ① Critic update ─────────────────────────────────────────
         with torch.no_grad():
             next_mask = self._mask_from_states(S_)
-            next_probs     = self.actor(S_, next_mask)                        # (B, 4)
-            next_log_probs = torch.log(next_probs + 1e-8)          # (B, 4)
+            next_probs = self.actor(S_, next_mask)
 
-            q1_next, q2_next = self.critic_target(S_)              # (B, 4) each
-            min_q_next = torch.min(q1_next, q2_next)               # (B, 4)
+            q1_next, q2_next = self.critic_target(S_)
+            min_q_next = torch.min(q1_next, q2_next)
 
-            # SAC-Discrete soft-value: expectation over all next actions
-            # V(s') = Σ_a π(a|s') * [Q(s',a) - α * log π(a|s')]
-            soft_v_next = (
-                next_probs * (min_q_next - self.alpha * next_log_probs)
-            ).sum(dim=1, keepdim=True)                             # (B, 1)
+            # HARD value: entropy excluded from bootstrap
+            # This prevents Q from inflating to r/(1-γ) + α×H/(1-γ)
+            # Q now converges to actual discounted returns ≈ 0.003/0.03 ≈ 0.1
+            hard_v_next = (next_probs * min_q_next).sum(dim=1, keepdim=True)
 
-            td_target = R + self.gamma * (1.0 - D) * soft_v_next
+            td_target = R + self.gamma * (1.0 - D) * hard_v_next
+            # No clamp — let Q find its natural level
 
         q1, q2     = self.critic(S)                                 # (B, 4) each
         q1_taken   = q1.gather(1, A.unsqueeze(1))                   # (B, 1)
@@ -205,13 +204,13 @@ class SACAgent:
         # Interpolate target between in-pos (ln2) and flat (ln3) based on batch composition
         adaptive_target = (in_pos_frac * np.log(2) +
                            (1 - in_pos_frac) * np.log(3)) * 0.75
-        alpha_loss = self.log_alpha * (entropy - adaptive_target).detach()
+        alpha_loss = self.log_alpha * (entropy - self.target_entropy).detach()
 
         self.alpha_opt.zero_grad()
         alpha_loss.backward()
         self.alpha_opt.step()
         with torch.no_grad():
-            self.log_alpha.clamp_(min=-1.0, max=2.0)
+            self.log_alpha.clamp_(min=-2.0, max=0.0)  # α ∈ [0.135, 1.0]
 
         # ── ④ Soft target update ─────────────────────────────────────────────
         # θ_target ← τ·θ + (1-τ)·θ_target

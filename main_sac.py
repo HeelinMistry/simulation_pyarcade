@@ -54,14 +54,14 @@ NUM_EPOCHS       = 100
 TRAIN_SPLIT      = 0.8          # first 80% for training, last 20% for val
 WARMUP_IDX       = 128          # aggregator warm-up rows (= max_pace × max_history)
 
-PATIENCE         = 6            # epochs without improvement before stopping
-WARMUP_EPOCHS    = 3
+PATIENCE         = 2            # epochs without improvement before stopping
+WARMUP_EPOCHS    = 2
 MIN_IMPROVE      = 0.005        # val PnL must improve by 0.1 pp to reset patience
 
 BUFFER_CAPACITY  = 30_000       # ~7 epochs of 4 h data (9 486 rows × 0.8 ≈ 7 588 / epoch)
 BATCH_SIZE       = 128
-UPDATE_EVERY     = 8            # update SAC every N environment steps
-UPDATES_PER_STEP = 1            # gradient steps per update call
+UPDATE_EVERY     = 4            # update SAC every N environment steps
+UPDATES_PER_STEP = 4            # gradient steps per update call
 LR               = 3e-4
 GAMMA            = 0.97         # at 4 h / tick: 0.97^6 ≈ 83 % weight over 1 day
 
@@ -252,7 +252,11 @@ def main():
               f"actor_loss={agent.last_actor_loss:.4f}")
         print(f"  Time  : {elapsed:.1f}s  |  updates this epoch: {train_metrics['update_count']}")
 
-        # Early stopping on val PnL degradation
+        short_pct = t_ac[1] / max(sum(t_ac), 1)
+        if epoch > WARMUP_EPOCHS and short_pct < 0.03:
+            print(f"  ⛔ SHORT collapsed to {short_pct:.1%} — stopping immediately")
+            break
+
         if v_pnl > best_val_pnl + MIN_IMPROVE:
             best_val_pnl = v_pnl
             no_improve = 0
