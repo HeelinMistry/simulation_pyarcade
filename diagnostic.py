@@ -6,112 +6,124 @@ Full post-training diagnostic suite for the SAC-Discrete trading agent.
 Run from project root:
     python diagnostic.py [--split val|train|both] [--checkpoint outcomes/sac_agent_best.pt]
 
+Fixes vs previous version
+──────────────────────────
+  FIX 1  Split now matches main_sac.py exactly — regime-balanced
+         (2022 bear + 2025 mixed) rather than chronological 80/20.
+         Training val and diagnostic val now measure the same data.
+
+  FIX 2  Bear/bull episodes are collected AND reported with full
+         write_summary output. Previously they were silently discarded.
+
+  FIX 3  Random baseline block moved inside if __name__ == "__main__"
+         guard so it no longer executes on every import.
+
+  FIX 4  write_summary saves per-label files instead of overwriting
+         a single diagnostic_summary.txt — bear, bull, val, train
+         each get their own file.
+
+  FIX 5  Annualized Sharpe denominator corrected for 4h candles
+         (~1.5 trades/day realistic at 4h, was using 6 trades/day).
+
 What it measures and why
 ────────────────────────
-The goal is to understand *why* the policy makes each decision per state,
-and whether those decisions are the best achievable given the learned Q-values.
-
   Section 1  Policy Confidence & Entropy
-             Is the policy actually committing to actions, or still diffuse?
-             A well-trained policy should show bimodal conviction: high certainty
-             on clear setups, moderate certainty on ambiguous ones.
-
   Section 2  Q-Value Health
-             Q1 vs Q2 disagreement reveals critic uncertainty. High disagreement
-             means the agent is in state-action regions it hasn't seen enough.
-             The chosen action should consistently have the highest min(Q1,Q2).
-
   Section 3  Action Distribution & Sequencing
-             Are LONG/SHORT/CLOSE/HOLD balanced sensibly?
-             Pathological patterns: all-HOLD (entropy collapse), alternating
-             LONG-SHORT every tick (churning), never CLOSE (holding forever).
-
   Section 4  Trade Outcome Analysis
-             Win rate, average PnL per trade, Sharpe ratio, max drawdown.
-             Conditioned on conviction level — are high-confidence trades
-             actually more profitable? This is the core signal.
-
   Section 5  Feature → Action Sensitivity
-             For each of the 6 raw indicators, how much does moving it from
-             its 10th to 90th percentile shift the action probabilities?
-             This reveals what the policy has actually learned to look for.
-
   Section 6  State-Conditional Probability Maps
-             Bin RSI and MACD into grid cells, compute mean action probs
-             per cell. Visualises the policy's learned market intuition.
-
   Section 7  Regime Analysis
-             Classifies each tick into a regime based on MeanDev (trend) and ATR
-             (volatility), then compares action distributions and conviction per regime.
-
   Section 8  Timing Analysis
-             Average conviction and win rate by hour-of-day and day-of-week.
-             Finds structural edges (or weaknesses) in specific sessions.
-
   Section 9  Critic Disagreement vs Outcome
-             Ticks where Q1 and Q2 disagree most should correlate with
-             lower win rates. Confirms the uncertainty signal is calibrated.
-
   Section 10 Action-State Consistency Check
-             For every LONG action, was RSI/momentum actually bullish?
-             For every SHORT, was it bearish? Catches policy inversion.
-             Outputs a confusion matrix of action vs market context.
 
 Output
 ──────
   outcomes/diagnostics/
-    01_confidence_entropy.png
-    02_qvalue_health.png
-    03_action_distribution.png
-    04_trade_outcomes.png
-    05_feature_sensitivity.png
-    06_state_probability_maps.png
-    07_regime_analysis.png
-    08_timing_analysis.png
-    09_uncertainty_vs_outcome.png
-    10_action_consistency.png
-    diagnostic_summary.txt
+    {label}_01_confidence_entropy.png  ... (prefixed by episode label)
+    diagnostic_summary_{label}.txt
 """
 
 import argparse
 import os
 import sys
 import warnings
-from collections import defaultdict
 from datetime import datetime
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
 import numpy as np
 import pandas as pd
 import torch
 
 warnings.filterwarnings("ignore")
 
-# ── Project imports ───────────────────────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(__file__))
 
-from agents.sac_agent      import SACAgent
+from agents.sac_agent        import SACAgent
 from agents.unified_executor import UnifiedExecutor
-from data.data_manager     import update_master_data
+from data.data_manager       import update_master_data
 
-# ── Configuration (must match main_sac.py exactly) ───────────────────────────
-BEST_PATH   = "outcomes/sac_agent_best.pt"
-FEATURES    = ["RSI_Scaled", "MACD_Scaled", "BB_Scaled",
-               "OBV_Scaled", "ATR_Scaled", "MeanDev_Scaled"]
-PACES     =  (1, 6, 42, 90)
-STATE_DIM = (len(FEATURES) * 2 * len(PACES)) + 2
-ACTION_DIM  = 4
-ACTION_NAMES = ["LONG", "SHORT", "CLOSE", "HOLD"]
+# ── Configuration — must match main_sac.py exactly ───────────────────────────
+BEST_PATH    = "outcomes/sac_agent_best.pt"
+FEATURES     = ["RSI_Scaled", "MACD_Scaled", "BB_Scaled",
+                "OBV_Scaled", "ATR_Scaled", "MeanDev_Scaled"]
+PACES        = (1, 6, 42, 90)
+STATE_DIM    = (len(FEATURES) * 2 * len(PACES)) + 2
+ACTION_DIM   = 4
+ACTION_NAMES  = ["LONG", "SHORT", "CLOSE", "HOLD"]
 ACTION_COLORS = ["#2ecc71", "#e74c3c", "#f39c12", "#95a5a6"]
-TRAIN_SPLIT = 0.8
-WARMUP_IDX  = 128
-OUT_DIR     = "outcomes/diagnostics"
-GAMMA = 0.97
+WARMUP_IDX   = 128        # must match main_sac.py
+GAMMA        = 0.97
+OUT_DIR      = "outcomes/diagnostics"
+
+# ── Regime-balanced split — MUST match main_sac.py exactly ───────────────────
+# Val years:   2022 (bear market) + 2025 (mixed/recent out-of-sample)
+# Train years: everything else
+VAL_YEARS   = [2022, 2025]
 
 os.makedirs(OUT_DIR, exist_ok=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Data split helper
+# ─────────────────────────────────────────────────────────────────────────────
+
+def make_splits(df: pd.DataFrame) -> dict:
+    """
+    Returns a dict of labelled DataFrames matching the regime split used
+    in main_sac.py, plus dedicated bear/bull holdouts for regime analysis.
+    All labels map to the same split used during training evaluation.
+    """
+    df = df.copy()
+    df["_year"] = pd.to_datetime(df["Open_time"], errors="coerce").dt.year
+
+    val_mask   = df["_year"].isin(VAL_YEARS)
+    train_mask = ~val_mask
+
+    train_df = df[train_mask].drop(columns=["_year"]).reset_index(drop=True)
+    val_df   = df[val_mask].drop(columns=["_year"]).reset_index(drop=True)
+
+    # Dedicated regime holdouts — used for bear/bull analysis
+    bear_df  = df[df["_year"] == 2022].drop(columns=["_year"]).reset_index(drop=True)
+    bull_df  = df[df["_year"].isin([2020, 2021, 2024])].drop(columns=["_year"]).reset_index(drop=True)
+
+    train_years = sorted(df[train_mask]["_year"].dropna().unique().tolist())
+    val_years   = sorted(df[val_mask]["_year"].dropna().unique().tolist())
+
+    print(f"  Train: {len(train_df):,} rows  |  years: {train_years}")
+    print(f"  Val:   {len(val_df):,} rows  |  years: {val_years}")
+    print(f"  Bear holdout (2022):          {len(bear_df):,} rows")
+    print(f"  Bull holdout (2020+2021+2024): {len(bull_df):,} rows\n")
+
+    return {
+        "train": train_df,
+        "val":   val_df,
+        "bear_2022":  bear_df,
+        "bull_trend": bull_df,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -120,9 +132,8 @@ os.makedirs(OUT_DIR, exist_ok=True)
 
 def collect_episode(agent: SACAgent, df: pd.DataFrame, label: str) -> dict:
     """
-    Full deterministic pass through df. Collects everything needed for
-    all diagnostic sections. Returns a dict of parallel arrays (one entry
-    per tick from WARMUP_IDX+1 onward).
+    Full deterministic pass through df.
+    Returns a dict of parallel arrays (one entry per tick from WARMUP_IDX+1).
     """
     executor = UnifiedExecutor(
         name=label, agent=agent, paces=PACES,
@@ -133,26 +144,24 @@ def collect_episode(agent: SACAgent, df: pd.DataFrame, label: str) -> dict:
     prices_arr     = df["Close"].values.astype(np.float32)
     n              = len(df)
 
+    if n <= WARMUP_IDX + 1:
+        print(f"  ⚠  {label}: only {n} rows — too few to evaluate (need >{WARMUP_IDX+1}).")
+        return _empty_episode(label)
+
     executor.aggregator.tick = 0
     executor.aggregator.warm_up_all(indicators_arr, WARMUP_IDX)
 
-    # Per-tick storage
-    ticks, prices, actions, entropies         = [], [], [], []
-    prob_long, prob_short, prob_close, prob_hold = [], [], [], []
-    q1_chosen, q2_chosen                      = [], []
-    q1_all, q2_all                            = [], []   # shape (n_ticks, 4)
-    q_disagreement                            = []
-    raw_features                              = []       # 6 raw indicators
-    positions, unrealized_pnl                = [], []
-    states_arr                               = []
+    ticks, prices, actions, entropies               = [], [], [], []
+    prob_long, prob_short, prob_close, prob_hold    = [], [], [], []
+    q1_chosen, q2_chosen                            = [], []
+    q1_all, q2_all, q_disagreement                 = [], [], []
+    raw_features, unrealized_pnl, states_arr        = [], [], []
 
-    # Trade tracking
-    trades = []   # list of dicts
-    open_tick = None
+    trades     = []
+    open_tick  = None
     open_price = None
-    open_side = None
-
-    device = agent.device
+    open_side  = None
+    device     = agent.device
 
     for i in range(WARMUP_IDX + 1, n):
         ind   = indicators_arr[i]
@@ -160,19 +169,14 @@ def collect_episode(agent: SACAgent, df: pd.DataFrame, label: str) -> dict:
 
         action, probs, realised_pnl, s_t = executor.step(ind, price, tick=i)
 
-        # ── Q-values via critic ───────────────────────────────────────────
         with torch.no_grad():
             s_tensor = torch.FloatTensor(s_t).unsqueeze(0).to(device)
-            q1v, q2v = agent.critic(s_tensor)           # (1, 4) each
+            q1v, q2v = agent.critic(s_tensor)
             q1v = q1v.squeeze(0).cpu().numpy()
             q2v = q2v.squeeze(0).cpu().numpy()
 
-        min_q = np.minimum(q1v, q2v)
-
-        # ── Entropy (bits) ────────────────────────────────────────────────
         ent = -np.sum(probs * np.log2(probs + 1e-9))
 
-        # ── Record tick ───────────────────────────────────────────────────
         ticks.append(i)
         prices.append(price)
         actions.append(action)
@@ -187,20 +191,17 @@ def collect_episode(agent: SACAgent, df: pd.DataFrame, label: str) -> dict:
         q2_all.append(q2v.copy())
         q_disagreement.append(float(np.abs(q1v - q2v).mean()))
         raw_features.append(ind.copy())
-        positions.append(executor.current_side)
         unrealized_pnl.append(float(s_t[-1]))
         states_arr.append(s_t.copy())
 
-        # ── Trade tracking ────────────────────────────────────────────────
         if realised_pnl != 0.0:
             if open_tick is not None:
-                duration = i - open_tick
-                # conviction at entry (prob of directional action taken)
+                duration         = i - open_tick
+                local_idx        = open_tick - WARMUP_IDX - 1
                 entry_conviction = float(
-                    prob_long[open_tick - WARMUP_IDX - 1]
-                    if open_side == "LONG"
-                    else prob_short[open_tick - WARMUP_IDX - 1]
-                )
+                    prob_long[local_idx] if open_side == "LONG"
+                    else prob_short[local_idx]
+                ) if local_idx >= 0 else 0.0
                 trades.append({
                     "entry_tick":       open_tick,
                     "exit_tick":        i,
@@ -211,29 +212,18 @@ def collect_episode(agent: SACAgent, df: pd.DataFrame, label: str) -> dict:
                     "exit_price":       price,
                     "entry_conviction": entry_conviction,
                     "exit_conviction":  float(probs[action]),
-                    "q_disagree_entry": q_disagreement[open_tick - WARMUP_IDX - 1]
-                                        if (open_tick - WARMUP_IDX - 1) >= 0
-                                        else 0.0,
+                    "q_disagree_entry": q_disagreement[local_idx] if local_idx >= 0 else 0.0,
                     "win":              realised_pnl > 0,
-                    "rsi_at_entry":     float(raw_features[open_tick - WARMUP_IDX - 1][0])
-                                        if (open_tick - WARMUP_IDX - 1) >= 0
-                                        else 0.0,
-                    "macd_at_entry":    float(raw_features[open_tick - WARMUP_IDX - 1][1])
-                                        if (open_tick - WARMUP_IDX - 1) >= 0
-                                        else 0.0,
+                    "rsi_at_entry":     float(raw_features[local_idx][0]) if local_idx >= 0 else 0.0,
+                    "macd_at_entry":    float(raw_features[local_idx][1]) if local_idx >= 0 else 0.0,
                 })
-            open_tick = None
-            open_price = None
-            open_side = None
+            open_tick = open_price = open_side = None
 
-        # Track new position openings
-        if action in (0, 1) and executor.current_side is not None:
-            if open_tick is None:
-                open_tick  = i
-                open_price = price
-                open_side  = executor.current_side
+        if action in (0, 1) and executor.current_side is not None and open_tick is None:
+            open_tick  = i
+            open_price = price
+            open_side  = executor.current_side
 
-    # Convert to arrays
     ticks          = np.array(ticks,          dtype=np.int32)
     prices         = np.array(prices,         dtype=np.float32)
     actions        = np.array(actions,        dtype=np.int32)
@@ -244,31 +234,26 @@ def collect_episode(agent: SACAgent, df: pd.DataFrame, label: str) -> dict:
     prob_hold      = np.array(prob_hold,      dtype=np.float32)
     q1_chosen      = np.array(q1_chosen,      dtype=np.float32)
     q2_chosen      = np.array(q2_chosen,      dtype=np.float32)
-    q1_all         = np.array(q1_all,         dtype=np.float32)   # (N, 4)
-    q2_all         = np.array(q2_all,         dtype=np.float32)   # (N, 4)
+    q1_all         = np.array(q1_all,         dtype=np.float32)
+    q2_all         = np.array(q2_all,         dtype=np.float32)
     q_disagreement = np.array(q_disagreement, dtype=np.float32)
-    raw_features   = np.array(raw_features,   dtype=np.float32)   # (N, 6)
+    raw_features   = np.array(raw_features,   dtype=np.float32)
     unrealized_pnl = np.array(unrealized_pnl, dtype=np.float32)
-    states_arr     = np.array(states_arr,     dtype=np.float32)   # (N, 92)
+    states_arr     = np.array(states_arr,     dtype=np.float32)
 
-    # Max probability (conviction) at every tick
     probs_all = np.stack([prob_long, prob_short, prob_close, prob_hold], axis=1)
     max_prob  = probs_all.max(axis=1)
 
-    # Cumulative PnL
     pnl_curve = np.zeros(len(ticks))
     for t in trades:
         pnl_curve[t["exit_tick"] - WARMUP_IDX - 1:] += t["pnl"]
 
-    # Parse timestamps if present
     timestamps = None
     if "Open_time" in df.columns:
         try:
-            ts = pd.to_datetime(df["Open_time"].iloc[WARMUP_IDX + 1:], errors='coerce')
-            timestamps = ts.tolist()  # or keep as series depending on downstream requirements
-
-        except Exception as e:
-            print(f"⚠ Warning: Timestamp parsing failed during diagnostics collection: {e}")
+            ts = pd.to_datetime(df["Open_time"].iloc[WARMUP_IDX + 1:], errors="coerce")
+            timestamps = ts.tolist()
+        except Exception:
             timestamps = None
 
     return {
@@ -293,21 +278,39 @@ def collect_episode(agent: SACAgent, df: pd.DataFrame, label: str) -> dict:
     }
 
 
+def _empty_episode(label: str) -> dict:
+    """Return a safe empty episode dict when data is too small."""
+    empty = np.array([], dtype=np.float32)
+    return {
+        "label": label, "ticks": np.array([], dtype=np.int32),
+        "prices": empty, "actions": np.array([], dtype=np.int32),
+        "entropies": empty,
+        "probs_all": np.zeros((0, 4), dtype=np.float32),
+        "max_prob": empty, "q1_chosen": empty, "q2_chosen": empty,
+        "q1_all": np.zeros((0, 4), dtype=np.float32),
+        "q2_all": np.zeros((0, 4), dtype=np.float32),
+        "q_disagreement": empty, "raw_features": np.zeros((0, 6), dtype=np.float32),
+        "unrealized_pnl": empty,
+        "states_arr": np.zeros((0, STATE_DIM), dtype=np.float32),
+        "trades": [], "pnl_curve": empty, "timestamps": None,
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Plotting helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
 STYLE = {
-    "axes.facecolor":    "#1a1a2e",
-    "figure.facecolor":  "#0f0f1a",
-    "axes.edgecolor":    "#444466",
-    "axes.labelcolor":   "#ccccee",
-    "xtick.color":       "#aaaacc",
-    "ytick.color":       "#aaaacc",
-    "text.color":        "#ddddff",
-    "grid.color":        "#2a2a4a",
-    "grid.linestyle":    "--",
-    "grid.alpha":        0.5,
+    "axes.facecolor":   "#1a1a2e",
+    "figure.facecolor": "#0f0f1a",
+    "axes.edgecolor":   "#444466",
+    "axes.labelcolor":  "#ccccee",
+    "xtick.color":      "#aaaacc",
+    "ytick.color":      "#aaaacc",
+    "text.color":       "#ddddff",
+    "grid.color":       "#2a2a4a",
+    "grid.linestyle":   "--",
+    "grid.alpha":       0.5,
 }
 
 
@@ -334,7 +337,9 @@ def savefig(fig, name):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def plot_confidence_entropy(ep: dict):
-    fig, axes = make_fig(2, 3, "Section 1 — Policy Confidence & Entropy")
+    if len(ep["ticks"]) == 0:
+        return
+    fig, axes = make_fig(2, 3, f"[{ep['label']}] Section 1 — Policy Confidence & Entropy")
     with plt.rc_context(STYLE):
         ax = axes[0][0]
         ax.hist(ep["max_prob"], bins=50, color="#7f5af0", edgecolor="none", alpha=0.85)
@@ -349,9 +354,9 @@ def plot_confidence_entropy(ep: dict):
 
         ax = axes[0][1]
         ax.hist(ep["entropies"], bins=50, color="#2cb67d", edgecolor="none", alpha=0.85)
-        target_entropy_bits = 0.98 * np.log2(4)
-        ax.axvline(target_entropy_bits, color="#ff6b6b", lw=1.5, linestyle="--",
-                   label=f"target={target_entropy_bits:.2f}b")
+        target_bits = 0.75 * np.log2(4)
+        ax.axvline(target_bits, color="#ff6b6b", lw=1.5, linestyle="--",
+                   label=f"target={target_bits:.2f}b")
         ax.axvline(np.mean(ep["entropies"]), color="#ffd700", lw=1.5,
                    label=f"mean={np.mean(ep['entropies']):.2f}b")
         ax.set_title("Policy Entropy Distribution (bits)")
@@ -360,9 +365,8 @@ def plot_confidence_entropy(ep: dict):
         ax.legend(fontsize=8)
         ax.grid(True)
 
-        # Conviction over time (rolling mean)
         ax = axes[0][2]
-        window = min(500, len(ep["max_prob"]) // 10)
+        window = max(1, min(200, len(ep["max_prob"]) // 10))
         rolling = pd.Series(ep["max_prob"]).rolling(window).mean().values
         ax.plot(ep["ticks"], rolling, color="#7f5af0", lw=1.0)
         ax.axhline(0.5, color="#ff6b6b", lw=1, linestyle="--")
@@ -371,10 +375,9 @@ def plot_confidence_entropy(ep: dict):
         ax.set_ylabel("Mean max-prob")
         ax.grid(True)
 
-        # Per-action probability distributions
         for j, (name, col) in enumerate(zip(ACTION_NAMES, ACTION_COLORS)):
-            ax = axes[1][j] if j < 3 else axes[1][2]
             if j < 3:
+                ax = axes[1][j]
                 ax.hist(ep["probs_all"][:, j], bins=40, color=col,
                         edgecolor="none", alpha=0.75, label=name)
                 ax.set_title(f"π({name}|s) distribution")
@@ -382,13 +385,16 @@ def plot_confidence_entropy(ep: dict):
                 ax.set_ylabel("Frequency")
                 ax.grid(True)
 
-        # HOLD in last panel alongside close
         ax = axes[1][2]
         ax.hist(ep["probs_all"][:, 3], bins=40, color=ACTION_COLORS[3],
                 edgecolor="none", alpha=0.55, label="HOLD")
+        ax.set_title("π(HOLD|s) distribution")
+        ax.set_xlabel("Probability")
+        ax.set_ylabel("Frequency")
         ax.legend(fontsize=8)
+        ax.grid(True)
 
-    savefig(fig, "01_confidence_entropy.png")
+    savefig(fig, f"{ep['label']}_01_confidence_entropy.png")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -396,9 +402,10 @@ def plot_confidence_entropy(ep: dict):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def plot_qvalue_health(ep: dict):
-    fig, axes = make_fig(2, 3, "Section 2 — Q-Value Health")
+    if len(ep["ticks"]) == 0:
+        return
+    fig, axes = make_fig(2, 3, f"[{ep['label']}] Section 2 — Q-Value Health")
     with plt.rc_context(STYLE):
-        # Q1 vs Q2 for chosen action — should be tightly correlated
         ax = axes[0][0]
         lim_lo = min(ep["q1_chosen"].min(), ep["q2_chosen"].min())
         lim_hi = max(ep["q1_chosen"].max(), ep["q2_chosen"].max())
@@ -411,7 +418,6 @@ def plot_qvalue_health(ep: dict):
         ax.legend(fontsize=8)
         ax.grid(True)
 
-        # Q1-Q2 disagreement distribution — low is healthy
         ax = axes[0][1]
         ax.hist(ep["q_disagreement"], bins=50, color="#f25f4c", edgecolor="none", alpha=0.8)
         ax.axvline(np.mean(ep["q_disagreement"]), color="#ffd700", lw=1.5,
@@ -422,9 +428,8 @@ def plot_qvalue_health(ep: dict):
         ax.legend(fontsize=8)
         ax.grid(True)
 
-        # Q-value distribution per action (min_Q)
         ax = axes[0][2]
-        min_q_all = np.minimum(ep["q1_all"], ep["q2_all"])   # (N, 4)
+        min_q_all = np.minimum(ep["q1_all"], ep["q2_all"])
         for j, (name, col) in enumerate(zip(ACTION_NAMES, ACTION_COLORS)):
             ax.hist(min_q_all[:, j], bins=40, color=col, alpha=0.55,
                     label=name, edgecolor="none")
@@ -434,13 +439,11 @@ def plot_qvalue_health(ep: dict):
         ax.legend(fontsize=8)
         ax.grid(True)
 
-        # Does the policy's chosen action have the highest min-Q?
         ax = axes[1][0]
         best_q_action = min_q_all.argmax(axis=1)
-        policy_action = ep["actions"]
-        match_rate = (best_q_action == policy_action).mean()
+        match_rate = (best_q_action == ep["actions"]).mean()
         confusion = np.zeros((4, 4), dtype=np.int32)
-        for pa, qa in zip(policy_action, best_q_action):
+        for pa, qa in zip(ep["actions"], best_q_action):
             confusion[pa, qa] += 1
         im = ax.imshow(confusion, cmap="Blues")
         ax.set_xticks(range(4)); ax.set_yticks(range(4))
@@ -448,15 +451,14 @@ def plot_qvalue_health(ep: dict):
         ax.set_yticklabels(ACTION_NAMES, fontsize=7)
         ax.set_xlabel("Best-Q Action")
         ax.set_ylabel("Policy Action")
-        ax.set_title(f"Policy vs Best-Q Action  (match={match_rate:.1%})")
+        ax.set_title(f"Policy vs Best-Q  (match={match_rate:.1%})")
         for r in range(4):
             for c in range(4):
                 ax.text(c, r, str(confusion[r, c]), ha="center",
                         va="center", fontsize=7, color="white")
 
-        # Q-value of chosen action over time (rolling mean)
         ax = axes[1][1]
-        window = min(500, len(ep["q1_chosen"]) // 10)
+        window = max(1, min(200, len(ep["q1_chosen"]) // 10))
         chosen_minq = np.minimum(ep["q1_chosen"], ep["q2_chosen"])
         rolling = pd.Series(chosen_minq).rolling(window).mean().values
         ax.plot(ep["ticks"], rolling, color="#2cb67d", lw=1.0)
@@ -466,30 +468,29 @@ def plot_qvalue_health(ep: dict):
         ax.set_ylabel("Q-value")
         ax.grid(True)
 
-        # Q-value vs actual outcome for trades
         ax = axes[1][2]
         if ep["trades"]:
-            entry_q = []
-            outcomes = []
+            entry_q, outcomes = [], []
             for t in ep["trades"]:
                 idx = t["entry_tick"] - WARMUP_IDX - 1
                 if 0 <= idx < len(ep["q1_all"]):
                     a = 0 if t["side"] == "LONG" else 1
-                    q = float(min(ep["q1_all"][idx, a], ep["q2_all"][idx, a]))
-                    entry_q.append(q)
+                    entry_q.append(float(min(ep["q1_all"][idx, a], ep["q2_all"][idx, a])))
                     outcomes.append(t["pnl"])
             if entry_q:
-                wins   = [q for q, p in zip(entry_q, outcomes) if p > 0]
-                losses = [q for q, p in zip(entry_q, outcomes) if p <= 0]
-                ax.hist(wins,   bins=20, color="#2ecc71", alpha=0.7, label="Win",  edgecolor="none")
-                ax.hist(losses, bins=20, color="#e74c3c", alpha=0.7, label="Loss", edgecolor="none")
+                eq, pl = np.array(entry_q), np.array(outcomes)
+                wins = pl > 0
+                ax.hist(eq[wins],   bins=20, color="#2ecc71", alpha=0.7,
+                        label="Win",  edgecolor="none")
+                ax.hist(eq[~wins],  bins=20, color="#e74c3c", alpha=0.7,
+                        label="Loss", edgecolor="none")
                 ax.set_title("Entry Q-value: Wins vs Losses")
                 ax.set_xlabel("min(Q1,Q2) at entry")
                 ax.set_ylabel("Trade count")
                 ax.legend(fontsize=8)
                 ax.grid(True)
 
-    savefig(fig, "02_qvalue_health.png")
+    savefig(fig, f"{ep['label']}_02_qvalue_health.png")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -497,21 +498,19 @@ def plot_qvalue_health(ep: dict):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def plot_action_distribution(ep: dict):
-    fig, axes = make_fig(2, 3, "Section 3 — Action Distribution & Sequencing")
+    if len(ep["ticks"]) == 0:
+        return
+    fig, axes = make_fig(2, 3, f"[{ep['label']}] Section 3 — Action Distribution & Sequencing")
     with plt.rc_context(STYLE):
-        # Pie chart of action counts
         ax = axes[0][0]
         counts = [(ep["actions"] == i).sum() for i in range(4)]
-        wedges, texts, autotexts = ax.pie(
-            counts, labels=ACTION_NAMES, colors=ACTION_COLORS,
-            autopct="%1.1f%%", startangle=90,
-            textprops={"color": "#ddddff", "fontsize": 9}
-        )
+        ax.pie(counts, labels=ACTION_NAMES, colors=ACTION_COLORS,
+               autopct="%1.1f%%", startangle=90,
+               textprops={"color": "#ddddff", "fontsize": 9})
         ax.set_title("Action Distribution")
 
-        # Action over time (rolling window shows policy evolution)
         ax = axes[0][1]
-        window = min(500, len(ep["actions"]) // 10)
+        window = max(1, min(200, len(ep["actions"]) // 10))
         for j, (name, col) in enumerate(zip(ACTION_NAMES, ACTION_COLORS)):
             mask = (ep["actions"] == j).astype(float)
             rolling = pd.Series(mask).rolling(window).mean().values
@@ -522,7 +521,6 @@ def plot_action_distribution(ep: dict):
         ax.legend(fontsize=7)
         ax.grid(True)
 
-        # Action transition matrix — what action follows each action
         ax = axes[0][2]
         trans = np.zeros((4, 4), dtype=np.float32)
         for curr, nxt in zip(ep["actions"][:-1], ep["actions"][1:]):
@@ -541,7 +539,6 @@ def plot_action_distribution(ep: dict):
                         color="black" if trans_pct[r, c] > 0.5 else "white")
         plt.colorbar(im, ax=ax)
 
-        # Run-length distribution — how many consecutive HOLDs?
         ax = axes[1][0]
         runs = []
         cur_run = 1
@@ -555,32 +552,29 @@ def plot_action_distribution(ep: dict):
         if runs:
             ax.hist(runs, bins=min(50, max(runs)), color="#95a5a6",
                     edgecolor="none", alpha=0.8)
-            ax.set_title(f"Consecutive HOLD Run Lengths  (median={np.median(runs):.0f})")
+            ax.set_title(f"Consecutive HOLD Runs  (median={np.median(runs):.0f})")
             ax.set_xlabel("Run length (ticks)")
             ax.set_ylabel("Count")
-            ax.set_xlim(0, np.percentile(runs, 95))
+            ax.set_xlim(0, np.percentile(runs, 95) if len(runs) > 1 else 10)
             ax.grid(True)
 
-        # Trade positions on price chart (last 2000 ticks for readability)
         ax = axes[1][1]
-        N = min(2000, len(ep["ticks"]))
-        slice_t = ep["ticks"][-N:]
-        slice_p = ep["prices"][-N:]
-        slice_a = ep["actions"][-N:]
-        ax.plot(slice_t, slice_p, color="#aaaacc", lw=0.8, alpha=0.7)
-        for action_idx, col, marker in zip([0,1,2], ["#2ecc71","#e74c3c","#f39c12"],
-                                           ["^","v","x"]):
-            mask = slice_a == action_idx
-            ax.scatter(slice_t[mask], slice_p[mask], color=col,
-                       s=15, marker=marker, zorder=3,
-                       label=ACTION_NAMES[action_idx], alpha=0.8)
+        N = min(1000, len(ep["ticks"]))
+        sl_t = ep["ticks"][-N:]
+        sl_p = ep["prices"][-N:]
+        sl_a = ep["actions"][-N:]
+        ax.plot(sl_t, sl_p, color="#aaaacc", lw=0.8, alpha=0.7)
+        for ai, col, marker in zip([0, 1, 2], ["#2ecc71", "#e74c3c", "#f39c12"],
+                                   ["^", "v", "x"]):
+            mask = sl_a == ai
+            ax.scatter(sl_t[mask], sl_p[mask], color=col, s=15,
+                       marker=marker, zorder=3, label=ACTION_NAMES[ai], alpha=0.8)
         ax.set_title(f"Signals on Price (last {N} ticks)")
         ax.set_xlabel("Tick")
         ax.set_ylabel("Price")
         ax.legend(fontsize=7)
         ax.grid(True)
 
-        # Conviction at each action type
         ax = axes[1][2]
         for j, (name, col) in enumerate(zip(ACTION_NAMES, ACTION_COLORS)):
             mask = ep["actions"] == j
@@ -593,7 +587,7 @@ def plot_action_distribution(ep: dict):
         ax.legend(fontsize=7)
         ax.grid(True)
 
-    savefig(fig, "03_action_distribution.png")
+    savefig(fig, f"{ep['label']}_03_action_distribution.png")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -603,31 +597,30 @@ def plot_action_distribution(ep: dict):
 def plot_trade_outcomes(ep: dict):
     trades = ep["trades"]
     if not trades:
-        print("  ⚠  No trades completed — skipping Section 4.")
+        print(f"  ⚠  [{ep['label']}] No trades completed — skipping Section 4.")
         return None
 
-    fig, axes = make_fig(2, 3, "Section 4 — Trade Outcome Analysis")
+    fig, axes = make_fig(2, 3, f"[{ep['label']}] Section 4 — Trade Outcome Analysis")
     pnls       = np.array([t["pnl"] for t in trades])
     wins       = pnls > 0
     durations  = np.array([t["duration"] for t in trades])
     conviction = np.array([t["entry_conviction"] for t in trades])
 
     with plt.rc_context(STYLE):
-        # PnL distribution
         ax = axes[0][0]
-        ax.hist(pnls[wins],  bins=30, color="#2ecc71", alpha=0.8, label="Win",  edgecolor="none")
-        ax.hist(pnls[~wins], bins=30, color="#e74c3c", alpha=0.8, label="Loss", edgecolor="none")
+        ax.hist(pnls[wins],  bins=30, color="#2ecc71", alpha=0.8,
+                label="Win",  edgecolor="none")
+        ax.hist(pnls[~wins], bins=30, color="#e74c3c", alpha=0.8,
+                label="Loss", edgecolor="none")
         ax.axvline(0, color="white", lw=1, linestyle="--")
         ax.axvline(pnls.mean(), color="#ffd700", lw=1.5,
                    label=f"mean={pnls.mean():.4%}")
-        win_rate = wins.mean()
-        ax.set_title(f"Trade PnL Distribution  (WR={win_rate:.1%}, n={len(trades)})")
+        ax.set_title(f"Trade PnL  (WR={wins.mean():.1%}, n={len(trades)})")
         ax.set_xlabel("PnL (fraction)")
         ax.set_ylabel("Count")
         ax.legend(fontsize=7)
         ax.grid(True)
 
-        # Cumulative PnL curve
         ax = axes[0][1]
         cum = np.cumsum(pnls)
         ax.plot(cum, color="#7f5af0", lw=1.5)
@@ -641,38 +634,34 @@ def plot_trade_outcomes(ep: dict):
         ax.set_ylabel("Cumulative PnL")
         ax.grid(True)
 
-        # Holding duration histogram
         ax = axes[0][2]
         ax.hist(durations, bins=40, color="#f39c12", edgecolor="none", alpha=0.8)
         ax.axvline(np.median(durations), color="#ffd700", lw=1.5,
                    label=f"median={np.median(durations):.0f} ticks")
-        ax.set_title("Holding Duration Distribution")
-        ax.set_xlabel("Duration (ticks) — 1 tick = 4 h")
+        ax.set_title("Holding Duration (1 tick = 4 h)")
+        ax.set_xlabel("Duration (ticks)")
         ax.set_ylabel("Count")
         ax.legend(fontsize=8)
         ax.grid(True)
 
-        # Conviction vs PnL scatter
         ax = axes[1][0]
         ax.scatter(conviction[wins],  pnls[wins],  s=8, color="#2ecc71",
                    alpha=0.5, label="Win")
         ax.scatter(conviction[~wins], pnls[~wins], s=8, color="#e74c3c",
                    alpha=0.5, label="Loss")
         ax.axhline(0, color="white", lw=0.8, linestyle="--")
-        # Add conviction quintile win rates
-        for q_lo, q_hi in [(0, 0.2),(0.2, 0.4),(0.4, 0.6),(0.6, 0.8),(0.8, 1.0)]:
+        for q_lo, q_hi in [(0, .2), (.2, .4), (.4, .6), (.6, .8), (.8, 1.)]:
             mask = (conviction >= q_lo) & (conviction < q_hi)
             if mask.sum() > 0:
-                wr = wins[mask].mean()
                 ax.text((q_lo + q_hi) / 2, pnls.min() * 0.9,
-                        f"{wr:.0%}", ha="center", fontsize=7, color="#ffd700")
-        ax.set_title("Entry Conviction vs PnL (Win rate by quintile in yellow)")
-        ax.set_xlabel("Entry conviction (prob of chosen direction)")
+                        f"{wins[mask].mean():.0%}", ha="center",
+                        fontsize=7, color="#ffd700")
+        ax.set_title("Conviction vs PnL (quintile WR in yellow)")
+        ax.set_xlabel("Entry conviction")
         ax.set_ylabel("PnL")
         ax.legend(fontsize=7)
         ax.grid(True)
 
-        # Duration vs PnL
         ax = axes[1][1]
         ax.scatter(durations[wins],  pnls[wins],  s=8, color="#2ecc71", alpha=0.5)
         ax.scatter(durations[~wins], pnls[~wins], s=8, color="#e74c3c", alpha=0.5)
@@ -680,18 +669,18 @@ def plot_trade_outcomes(ep: dict):
         ax.set_title("Holding Duration vs PnL")
         ax.set_xlabel("Duration (ticks)")
         ax.set_ylabel("PnL")
-        ax.set_xlim(0, np.percentile(durations, 95))
+        if len(durations) > 1:
+            ax.set_xlim(0, np.percentile(durations, 95))
         ax.grid(True)
 
-        # LONG vs SHORT performance
         ax = axes[1][2]
-        for side, col, label in [("LONG","#2ecc71","Long"), ("SHORT","#e74c3c","Short")]:
-            side_pnls = [t["pnl"] for t in trades if t["side"] == side]
-            if side_pnls:
-                side_pnls = np.array(side_pnls)
-                wr = (side_pnls > 0).mean()
-                ax.hist(side_pnls, bins=25, color=col, alpha=0.7, edgecolor="none",
-                        label=f"{label}: WR={wr:.1%} n={len(side_pnls)}")
+        for side, col, lbl in [("LONG", "#2ecc71", "Long"),
+                                ("SHORT", "#e74c3c", "Short")]:
+            sp = np.array([t["pnl"] for t in trades if t["side"] == side])
+            if len(sp):
+                wr = (sp > 0).mean()
+                ax.hist(sp, bins=25, color=col, alpha=0.7, edgecolor="none",
+                        label=f"{lbl}: WR={wr:.1%} n={len(sp)}")
         ax.axvline(0, color="white", lw=0.8, linestyle="--")
         ax.set_title("PnL by Trade Side")
         ax.set_xlabel("PnL")
@@ -699,7 +688,7 @@ def plot_trade_outcomes(ep: dict):
         ax.legend(fontsize=7)
         ax.grid(True)
 
-    savefig(fig, "04_trade_outcomes.png")
+    savefig(fig, f"{ep['label']}_04_trade_outcomes.png")
     return pnls
 
 
@@ -708,66 +697,40 @@ def plot_trade_outcomes(ep: dict):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def plot_feature_sensitivity(agent: SACAgent, ep: dict):
-    """
-    Measures how much each raw indicator shifts action probabilities.
-    Uses the p10→p90 perturbation: for each feature, clamp all states
-    to the 10th and 90th percentile of that feature, re-run the actor,
-    and compute the mean probability shift for each action.
-    This reveals what the policy has actually learned to respond to.
-    """
+    if len(ep["ticks"]) == 0:
+        return
     states = torch.FloatTensor(ep["states_arr"]).to(agent.device)
     device = agent.device
 
-    # Baseline probabilities
-    with torch.no_grad():
-        base_probs = agent.actor(states).cpu().numpy()   # (N, 4)
-
-    # Feature indices in the 92-d state:
-    # The state is [pace1_cur(6), pace1_slope(6), pace1_std(6),
-    #               pace2_cur(6), ..., pace12_std(6),  position, unrealized_pnl]
-    # Raw indicator i appears at positions: i, i+6, i+12 for pace1,
-    # and i+18k, i+18k+6, i+18k+12 for pace k.
-    # But the simplest sensitivity is to perturb the raw indicator at pace1
-    # (indices 0-5 = current values of pace-1 agent) which updates every tick.
-
-    fig, axes = make_fig(2, 3, "Section 5 — Feature → Action Sensitivity (p10→p90)")
+    fig, axes = make_fig(2, 3,
+        f"[{ep['label']}] Section 5 — Feature → Action Sensitivity (p10→p90)")
     with plt.rc_context(STYLE):
         for feat_idx, feat_name in enumerate(FEATURES):
             ax = axes[feat_idx // 3][feat_idx % 3]
-
-            # Perturb: set feature to p10 and p90 for the pace-1 current value
-            state_col_idx = feat_idx   # pace-1 current block starts at 0
-
-            feat_vals  = ep["states_arr"][:, state_col_idx]
-            p10        = np.percentile(feat_vals, 10)
-            p90        = np.percentile(feat_vals, 90)
-
-            states_lo  = states.clone()
-            states_hi  = states.clone()
-            states_lo[:, state_col_idx] = torch.tensor(p10, dtype=torch.float32, device=device)
-            states_hi[:, state_col_idx] = torch.tensor(p90, dtype=torch.float32, device=device)
-
+            feat_vals = ep["states_arr"][:, feat_idx]
+            p10 = np.percentile(feat_vals, 10)
+            p90 = np.percentile(feat_vals, 90)
+            states_lo = states.clone()
+            states_hi = states.clone()
+            states_lo[:, feat_idx] = torch.full((states.shape[0],), float(p10), device=device)
+            states_hi[:, feat_idx] = torch.full((states.shape[0],), float(p90), device=device)
             with torch.no_grad():
                 probs_lo = agent.actor(states_lo).cpu().numpy()
                 probs_hi = agent.actor(states_hi).cpu().numpy()
-
-            delta = probs_hi - probs_lo   # (N, 4) — mean shift from p10→p90
-
-            means  = delta.mean(axis=0)
-            stds   = delta.std(axis=0)
-            x      = np.arange(4)
-
-            bars = ax.bar(x, means, color=ACTION_COLORS, alpha=0.85, width=0.6)
-            ax.errorbar(x, means, yerr=stds, fmt="none", color="white",
-                        capsize=4, lw=1.5)
+            delta = probs_hi - probs_lo
+            means = delta.mean(axis=0)
+            stds  = delta.std(axis=0)
+            ax.bar(range(4), means, color=ACTION_COLORS, alpha=0.85, width=0.6)
+            ax.errorbar(range(4), means, yerr=stds, fmt="none",
+                        color="white", capsize=4, lw=1.5)
             ax.axhline(0, color="#aaaacc", lw=0.8, linestyle="--")
-            ax.set_xticks(x)
+            ax.set_xticks(range(4))
             ax.set_xticklabels(ACTION_NAMES, fontsize=8)
             ax.set_title(f"{feat_name}\n(p10={p10:.2f} → p90={p90:.2f})")
             ax.set_ylabel("Δ probability")
             ax.grid(True, axis="y")
 
-    savefig(fig, "05_feature_sensitivity.png")
+    savefig(fig, f"{ep['label']}_05_feature_sensitivity.png")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -775,23 +738,20 @@ def plot_feature_sensitivity(agent: SACAgent, ep: dict):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def plot_state_probability_maps(ep: dict):
-    """
-    Bins RSI × MACD into a 10×10 grid and shows mean action probabilities
-    per cell. Reveals the learned policy surface on the two most
-    interpretable momentum indicators.
-    """
-    rsi  = ep["raw_features"][:, 0]   # RSI_Scaled ∈ [-1, 1]
-    macd = ep["raw_features"][:, 1]   # MACD_Scaled ∈ [-1, 1]
-    probs = ep["probs_all"]            # (N, 4)
-
-    bins = 10
+    if len(ep["ticks"]) == 0:
+        return
+    rsi   = ep["raw_features"][:, 0]
+    macd  = ep["raw_features"][:, 1]
+    probs = ep["probs_all"]
+    bins  = 10
     rsi_edges  = np.linspace(rsi.min(),  rsi.max(),  bins + 1)
     macd_edges = np.linspace(macd.min(), macd.max(), bins + 1)
 
-    fig, axes = make_fig(2, 2, "Section 6 — Policy Surface: RSI × MACD Grid",
-                         figsize=(12, 10))
+    fig, axes = make_fig(2, 2,
+        f"[{ep['label']}] Section 6 — Policy Surface: RSI × MACD Grid",
+        figsize=(12, 10))
     with plt.rc_context(STYLE):
-        for j, (name, col) in enumerate(zip(ACTION_NAMES, ACTION_COLORS)):
+        for j, (name, _) in enumerate(zip(ACTION_NAMES, ACTION_COLORS)):
             ax = axes[j // 2][j % 2]
             grid = np.full((bins, bins), np.nan)
             for ri in range(bins):
@@ -802,36 +762,24 @@ def plot_state_probability_maps(ep: dict):
                     )
                     if mask.sum() > 5:
                         grid[ri, mi] = probs[mask, j].mean()
-
-            im = ax.imshow(
-                grid, origin="lower", aspect="auto", cmap="plasma",
-                vmin=0, vmax=probs[:, j].quantile_if_possible
-                if hasattr(probs[:, j], "quantile_if_possible")
-                else min(0.9, np.nanpercentile(grid[~np.isnan(grid)], 95))
-                   if not np.all(np.isnan(grid)) else 0.5
-            )
-            # Cleaner vmax
-            vmax_val = min(0.9, np.nanpercentile(grid[~np.isnan(grid)], 95)) \
-                       if not np.all(np.isnan(grid)) else 0.5
-            im.set_clim(0, vmax_val)
-
+            valid = grid[~np.isnan(grid)]
+            vmax  = min(0.9, np.nanpercentile(valid, 95)) if len(valid) else 0.5
+            im = ax.imshow(grid, origin="lower", aspect="auto",
+                           cmap="plasma", vmin=0, vmax=vmax)
             ax.set_title(f"Mean π({name}|s)  — RSI × MACD grid")
             ax.set_xlabel("MACD_Scaled bins")
             ax.set_ylabel("RSI_Scaled bins")
-            # Axis tick labels
-            rsi_centers  = (rsi_edges[:-1]  + rsi_edges[1:])  / 2
-            macd_centers = (macd_edges[:-1] + macd_edges[1:]) / 2
+            rsi_c  = (rsi_edges[:-1]  + rsi_edges[1:])  / 2
+            macd_c = (macd_edges[:-1] + macd_edges[1:]) / 2
             ax.set_xticks([0, bins//2, bins-1])
-            ax.set_xticklabels([f"{macd_centers[0]:.1f}",
-                                 f"{macd_centers[bins//2]:.1f}",
-                                 f"{macd_centers[-1]:.1f}"], fontsize=7)
+            ax.set_xticklabels([f"{macd_c[0]:.1f}", f"{macd_c[bins//2]:.1f}",
+                                 f"{macd_c[-1]:.1f}"], fontsize=7)
             ax.set_yticks([0, bins//2, bins-1])
-            ax.set_yticklabels([f"{rsi_centers[0]:.1f}",
-                                 f"{rsi_centers[bins//2]:.1f}",
-                                 f"{rsi_centers[-1]:.1f}"], fontsize=7)
+            ax.set_yticklabels([f"{rsi_c[0]:.1f}", f"{rsi_c[bins//2]:.1f}",
+                                 f"{rsi_c[-1]:.1f}"], fontsize=7)
             plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
-    savefig(fig, "06_state_probability_maps.png")
+    savefig(fig, f"{ep['label']}_06_state_probability_maps.png")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -839,32 +787,22 @@ def plot_state_probability_maps(ep: dict):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def plot_regime_analysis(ep: dict):
-    """
-    Classifies each tick into a regime based on MeanDev (trend) and ATR
-    (volatility), then compares action distributions and conviction per regime.
-    """
-    mean_dev = ep["raw_features"][:, 5]   # MeanDev_Scaled
-    atr      = ep["raw_features"][:, 4]   # ATR_Scaled
-
-    # Regime labels
-    trending_up   = (mean_dev >  0.1) & (atr > 0)
-    trending_down = (mean_dev < -0.1) & (atr > 0)
-    ranging       = (mean_dev >= -0.1) & (mean_dev <= 0.1)
-    high_vol      = atr > np.percentile(atr, 75)
-    low_vol       = atr < np.percentile(atr, 25)
+    if len(ep["ticks"]) == 0:
+        return
+    mean_dev = ep["raw_features"][:, 5]
+    atr      = ep["raw_features"][:, 4]
 
     regimes = {
-        "Trending Up":   trending_up,
-        "Trending Down": trending_down,
-        "Ranging":       ranging,
-        "High Vol":      high_vol,
-        "Low Vol":       low_vol,
+        "Trending Up":   (mean_dev >  0.1) & (atr > 0),
+        "Trending Down": (mean_dev < -0.1) & (atr > 0),
+        "Ranging":       (mean_dev >= -0.1) & (mean_dev <= 0.1),
+        "High Vol":      atr > np.percentile(atr, 75),
+        "Low Vol":       atr < np.percentile(atr, 25),
     }
-    regime_colors = ["#2ecc71","#e74c3c","#95a5a6","#f39c12","#3498db"]
+    regime_colors = ["#2ecc71", "#e74c3c", "#95a5a6", "#f39c12", "#3498db"]
 
-    fig, axes = make_fig(2, 3, "Section 7 — Regime Analysis")
+    fig, axes = make_fig(2, 3, f"[{ep['label']}] Section 7 — Regime Analysis")
     with plt.rc_context(STYLE):
-        # Action distribution per regime
         ax = axes[0][0]
         x = np.arange(4)
         width = 0.15
@@ -881,59 +819,50 @@ def plot_regime_analysis(ep: dict):
         ax.legend(fontsize=6)
         ax.grid(True, axis="y")
 
-        # Conviction per regime
         ax = axes[0][1]
-        conv_data  = []
-        conv_labels = []
+        conv_data, conv_labels = [], []
         for rname, mask in regimes.items():
             if mask.sum() > 10:
                 conv_data.append(ep["max_prob"][mask])
                 conv_labels.append(f"{rname}\n(n={mask.sum():,})")
-        bp = ax.boxplot(conv_data, patch_artist=True,
-                        medianprops={"color": "white", "lw": 2})
-        for patch, col in zip(bp["boxes"], regime_colors):
-            patch.set_facecolor(col)
-            patch.set_alpha(0.7)
-        ax.set_xticks(range(1, len(conv_labels) + 1))
-        ax.set_xticklabels(conv_labels, fontsize=6)
+        if conv_data:
+            bp = ax.boxplot(conv_data, patch_artist=True,
+                            medianprops={"color": "white", "lw": 2})
+            for patch, col in zip(bp["boxes"], regime_colors):
+                patch.set_facecolor(col); patch.set_alpha(0.7)
+            ax.set_xticks(range(1, len(conv_labels) + 1))
+            ax.set_xticklabels(conv_labels, fontsize=6)
         ax.set_title("Conviction by Regime")
         ax.set_ylabel("max π(a|s)")
         ax.grid(True, axis="y")
 
-        # Entropy per regime
         ax = axes[0][2]
-        ent_data = []
-        for rname, mask in regimes.items():
-            if mask.sum() > 10:
-                ent_data.append(ep["entropies"][mask])
-        bp2 = ax.boxplot(ent_data, patch_artist=True,
-                         medianprops={"color": "white", "lw": 2})
-        for patch, col in zip(bp2["boxes"], regime_colors):
-            patch.set_facecolor(col)
-            patch.set_alpha(0.7)
-        ax.set_xticks(range(1, len(conv_labels) + 1))
-        ax.set_xticklabels(conv_labels, fontsize=6)
+        ent_data = [ep["entropies"][mask] for _, mask in regimes.items()
+                    if mask.sum() > 10]
+        if ent_data:
+            bp2 = ax.boxplot(ent_data, patch_artist=True,
+                             medianprops={"color": "white", "lw": 2})
+            for patch, col in zip(bp2["boxes"], regime_colors):
+                patch.set_facecolor(col); patch.set_alpha(0.7)
+            ax.set_xticks(range(1, len(conv_labels) + 1))
+            ax.set_xticklabels(conv_labels, fontsize=6)
         ax.set_title("Policy Entropy by Regime")
         ax.set_ylabel("H[π] bits")
         ax.grid(True, axis="y")
 
-        # Trade win rate per regime
         ax = axes[1][0]
         if ep["trades"]:
-            wr_vals  = []
-            wr_names = []
+            wr_vals, wr_names = [], []
             for rname, mask in regimes.items():
                 regime_ticks = set(ep["ticks"][mask].tolist())
-                regime_trades = [t for t in ep["trades"]
-                                 if t["entry_tick"] in regime_ticks]
-                if len(regime_trades) >= 3:
-                    wr = np.mean([t["win"] for t in regime_trades])
-                    wr_vals.append(wr)
-                    wr_names.append(f"{rname}\n(n={len(regime_trades)})")
+                rt = [t for t in ep["trades"] if t["entry_tick"] in regime_ticks]
+                if len(rt) >= 3:
+                    wr_vals.append(np.mean([t["win"] for t in rt]))
+                    wr_names.append(f"{rname}\n(n={len(rt)})")
             if wr_vals:
-                bars = ax.bar(range(len(wr_vals)), wr_vals,
-                              color=[regime_colors[i] for i in range(len(wr_vals))],
-                              alpha=0.8)
+                ax.bar(range(len(wr_vals)), wr_vals,
+                       color=[regime_colors[i] for i in range(len(wr_vals))],
+                       alpha=0.8)
                 ax.axhline(0.5, color="white", lw=1, linestyle="--")
                 ax.set_xticks(range(len(wr_names)))
                 ax.set_xticklabels(wr_names, fontsize=6)
@@ -942,7 +871,6 @@ def plot_regime_analysis(ep: dict):
                 ax.set_ylim(0, 1)
                 ax.grid(True, axis="y")
 
-        # MeanDev vs action scatter
         ax = axes[1][1]
         for j, (name, col) in enumerate(zip(ACTION_NAMES[:2], ACTION_COLORS[:2])):
             mask = ep["actions"] == j
@@ -954,21 +882,22 @@ def plot_regime_analysis(ep: dict):
         ax.legend(fontsize=8)
         ax.grid(True)
 
-        # Conviction during HOLD — is HOLD high-confidence?
         ax = axes[1][2]
-        hold_mask = ep["actions"] == 3
+        hold_mask    = ep["actions"] == 3
         nonhold_mask = ep["actions"] != 3
-        ax.hist(ep["max_prob"][nonhold_mask], bins=40, color="#7f5af0",
-                alpha=0.7, label="Active actions", edgecolor="none", density=True)
-        ax.hist(ep["max_prob"][hold_mask], bins=40, color="#95a5a6",
-                alpha=0.7, label="HOLD", edgecolor="none", density=True)
-        ax.set_title("Conviction: HOLD vs Active Actions")
+        if nonhold_mask.sum() > 0:
+            ax.hist(ep["max_prob"][nonhold_mask], bins=40, color="#7f5af0",
+                    alpha=0.7, label="Active", edgecolor="none", density=True)
+        if hold_mask.sum() > 0:
+            ax.hist(ep["max_prob"][hold_mask], bins=40, color="#95a5a6",
+                    alpha=0.7, label="HOLD", edgecolor="none", density=True)
+        ax.set_title("Conviction: HOLD vs Active")
         ax.set_xlabel("max π(a|s)")
         ax.set_ylabel("Density")
         ax.legend(fontsize=8)
         ax.grid(True)
 
-    savefig(fig, "07_regime_analysis.png")
+    savefig(fig, f"{ep['label']}_07_regime_analysis.png")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -976,23 +905,22 @@ def plot_regime_analysis(ep: dict):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def plot_timing_analysis(ep: dict):
-    if ep["timestamps"] is None:
-        print("  ⚠  No timestamps — skipping Section 8.")
+    if ep["timestamps"] is None or len(ep["ticks"]) == 0:
+        print(f"  ⚠  [{ep['label']}] No timestamps — skipping Section 8.")
         return
 
-    ts = ep["timestamps"]
-    hours    = np.array([t.hour     for t in ts])
-    weekdays = np.array([t.dayofweek for t in ts])  # 0=Mon, 4=Fri
+    ts       = ep["timestamps"]
+    hours    = np.array([t.hour      for t in ts])
+    weekdays = np.array([t.dayofweek for t in ts])
 
-    fig, axes = make_fig(2, 2, "Section 8 — Timing Analysis")
+    fig, axes = make_fig(2, 2, f"[{ep['label']}] Section 8 — Timing Analysis")
     with plt.rc_context(STYLE):
-        # Conviction by hour
         ax = axes[0][0]
-        hour_conv = [ep["max_prob"][hours == h] for h in range(24)]
-        means = [v.mean() if len(v) > 0 else 0 for v in hour_conv]
+        means = [ep["max_prob"][hours == h].mean() if (hours == h).sum() > 0 else 0
+                 for h in range(24)]
         ax.bar(range(24), means, color="#7f5af0", alpha=0.8)
-        ax.axhline(ep["max_prob"].mean(), color="#ffd700", lw=1.5, linestyle="--",
-                   label=f"overall mean={ep['max_prob'].mean():.2f}")
+        ax.axhline(ep["max_prob"].mean(), color="#ffd700", lw=1.5,
+                   linestyle="--", label=f"overall={ep['max_prob'].mean():.2f}")
         ax.set_title("Mean Conviction by Hour (UTC)")
         ax.set_xlabel("Hour")
         ax.set_ylabel("Mean max-prob")
@@ -1000,36 +928,35 @@ def plot_timing_analysis(ep: dict):
         ax.legend(fontsize=7)
         ax.grid(True, axis="y")
 
-        # Win rate by hour (for completed trades)
         ax = axes[0][1]
         if ep["trades"]:
-            hour_of_entry = {}
+            hour_of_entry: dict = {}
             for t in ep["trades"]:
                 idx = t["entry_tick"] - WARMUP_IDX - 1
                 if 0 <= idx < len(ts):
                     h = ts[idx].hour
                     hour_of_entry.setdefault(h, []).append(t["win"])
-            hours_list   = sorted(hour_of_entry.keys())
-            wr_by_hour   = [np.mean(hour_of_entry[h]) for h in hours_list]
-            trade_counts = [len(hour_of_entry[h]) for h in hours_list]
-            bars = ax.bar(hours_list, wr_by_hour,
-                          color=["#2ecc71" if w >= 0.5 else "#e74c3c"
-                                 for w in wr_by_hour], alpha=0.8)
-            ax.axhline(0.5, color="white", lw=1, linestyle="--")
-            for h, wr, cnt in zip(hours_list, wr_by_hour, trade_counts):
-                ax.text(h, wr + 0.02, str(cnt), ha="center",
-                        fontsize=6, color="#aaaacc")
-            ax.set_title("Trade Win Rate by Hour of Day")
-            ax.set_xlabel("Hour (UTC)")
-            ax.set_ylabel("Win rate")
-            ax.set_ylim(0, 1.1)
-            ax.grid(True, axis="y")
+            if hour_of_entry:
+                hrs_list = sorted(hour_of_entry.keys())
+                wr_list  = [np.mean(hour_of_entry[h]) for h in hrs_list]
+                cnt_list = [len(hour_of_entry[h]) for h in hrs_list]
+                ax.bar(hrs_list, wr_list,
+                       color=["#2ecc71" if w >= 0.5 else "#e74c3c"
+                              for w in wr_list], alpha=0.8)
+                ax.axhline(0.5, color="white", lw=1, linestyle="--")
+                for h, wr, cnt in zip(hrs_list, wr_list, cnt_list):
+                    ax.text(h, wr + 0.02, str(cnt), ha="center",
+                            fontsize=6, color="#aaaacc")
+                ax.set_title("Trade Win Rate by Hour of Day")
+                ax.set_xlabel("Hour (UTC)")
+                ax.set_ylabel("Win rate")
+                ax.set_ylim(0, 1.1)
+                ax.grid(True, axis="y")
 
-        # Conviction by weekday
         ax = axes[1][0]
-        day_names = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
-        day_conv  = [ep["max_prob"][weekdays == d] for d in range(7)]
-        means_d   = [v.mean() if len(v) > 0 else 0 for v in day_conv]
+        day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        means_d = [ep["max_prob"][weekdays == d].mean()
+                   if (weekdays == d).sum() > 0 else 0 for d in range(7)]
         ax.bar(range(7), means_d, color="#2cb67d", alpha=0.8)
         ax.axhline(ep["max_prob"].mean(), color="#ffd700", lw=1.5, linestyle="--")
         ax.set_xticks(range(7))
@@ -1038,21 +965,20 @@ def plot_timing_analysis(ep: dict):
         ax.set_ylabel("Mean max-prob")
         ax.grid(True, axis="y")
 
-        # LONG vs SHORT frequency by hour
         ax = axes[1][1]
-        long_by_hour  = [(ep["actions"][hours == h] == 0).sum() for h in range(24)]
-        short_by_hour = [(ep["actions"][hours == h] == 1).sum() for h in range(24)]
+        long_h  = [(ep["actions"][hours == h] == 0).sum() for h in range(24)]
+        short_h = [(ep["actions"][hours == h] == 1).sum() for h in range(24)]
         x = np.arange(24)
-        ax.bar(x - 0.2, long_by_hour,  0.4, color="#2ecc71", alpha=0.8, label="LONG")
-        ax.bar(x + 0.2, short_by_hour, 0.4, color="#e74c3c", alpha=0.8, label="SHORT")
-        ax.set_title("LONG vs SHORT Trade Openings by Hour")
+        ax.bar(x - 0.2, long_h,  0.4, color="#2ecc71", alpha=0.8, label="LONG")
+        ax.bar(x + 0.2, short_h, 0.4, color="#e74c3c", alpha=0.8, label="SHORT")
+        ax.set_title("LONG vs SHORT by Hour")
         ax.set_xlabel("Hour (UTC)")
         ax.set_ylabel("Count")
         ax.set_xticks(range(24))
         ax.legend(fontsize=8)
         ax.grid(True, axis="y")
 
-    savefig(fig, "08_timing_analysis.png")
+    savefig(fig, f"{ep['label']}_08_timing_analysis.png")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1060,63 +986,58 @@ def plot_timing_analysis(ep: dict):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def plot_uncertainty_vs_outcome(ep: dict):
-    trades = ep["trades"]
-    if not trades:
-        print("  ⚠  No trades — skipping Section 9.")
+    if not ep["trades"] or len(ep["ticks"]) == 0:
+        print(f"  ⚠  [{ep['label']}] No trades — skipping Section 9.")
         return
 
-    fig, axes = make_fig(2, 2, "Section 9 — Critic Uncertainty vs Outcome")
+    fig, axes = make_fig(2, 2,
+        f"[{ep['label']}] Section 9 — Critic Uncertainty vs Outcome")
     with plt.rc_context(STYLE):
-        # Q-disagreement at entry vs trade PnL
-        ax = axes[0][0]
-        entry_disagree = []
-        pnls = []
-        for t in trades:
+        entry_disagree, pnls = [], []
+        for t in ep["trades"]:
             idx = t["entry_tick"] - WARMUP_IDX - 1
             if 0 <= idx < len(ep["q_disagreement"]):
                 entry_disagree.append(ep["q_disagreement"][idx])
                 pnls.append(t["pnl"])
+
         if entry_disagree:
-            ed = np.array(entry_disagree)
-            pl = np.array(pnls)
+            ed   = np.array(entry_disagree)
+            pl   = np.array(pnls)
             wins = pl > 0
+
+            ax = axes[0][0]
             ax.scatter(ed[wins],  pl[wins],  s=10, color="#2ecc71", alpha=0.5, label="Win")
             ax.scatter(ed[~wins], pl[~wins], s=10, color="#e74c3c", alpha=0.5, label="Loss")
             ax.axhline(0, color="white", lw=0.8, linestyle="--")
             corr = np.corrcoef(ed, pl)[0, 1]
             ax.set_title(f"Q-Disagreement at Entry vs PnL  (r={corr:.3f})")
-            ax.set_xlabel("|Q1-Q2| mean at entry")
+            ax.set_xlabel("|Q1-Q2| at entry")
             ax.set_ylabel("PnL")
             ax.legend(fontsize=8)
             ax.grid(True)
 
-        # Disagreement quintile win rates
-        ax = axes[0][1]
-        if entry_disagree:
-            quintile_wr = []
-            quintile_labels = []
+            ax = axes[0][1]
+            q_wr, q_labels = [], []
             for q in range(5):
                 lo = np.percentile(ed, q * 20)
                 hi = np.percentile(ed, (q + 1) * 20)
                 mask = (ed >= lo) & (ed <= hi)
                 if mask.sum() > 0:
-                    wr = wins[mask].mean()
-                    quintile_wr.append(wr)
-                    quintile_labels.append(f"Q{q+1}\n({lo:.3f}-{hi:.3f})")
-            bars = ax.bar(range(len(quintile_wr)), quintile_wr,
-                          color=["#2ecc71" if w >= 0.5 else "#e74c3c"
-                                 for w in quintile_wr], alpha=0.8)
+                    q_wr.append(wins[mask].mean())
+                    q_labels.append(f"Q{q+1}\n({lo:.3f}-{hi:.3f})")
+            ax.bar(range(len(q_wr)), q_wr,
+                   color=["#2ecc71" if w >= 0.5 else "#e74c3c" for w in q_wr],
+                   alpha=0.8)
             ax.axhline(0.5, color="white", lw=1, linestyle="--")
-            ax.set_xticks(range(len(quintile_labels)))
-            ax.set_xticklabels(quintile_labels, fontsize=7)
-            ax.set_title("Win Rate by Q-Disagreement Quintile at Entry")
+            ax.set_xticks(range(len(q_labels)))
+            ax.set_xticklabels(q_labels, fontsize=7)
+            ax.set_title("Win Rate by Q-Disagreement Quintile")
             ax.set_ylabel("Win rate")
             ax.set_ylim(0, 1)
             ax.grid(True, axis="y")
 
-        # Disagreement over time (rolling mean)
         ax = axes[1][0]
-        window = min(500, len(ep["q_disagreement"]) // 10)
+        window = max(1, min(200, len(ep["q_disagreement"]) // 10))
         rolling = pd.Series(ep["q_disagreement"]).rolling(window).mean().values
         ax.plot(ep["ticks"], rolling, color="#f39c12", lw=1.0)
         ax.set_title(f"Critic Disagreement Over Time (rolling {window})")
@@ -1124,128 +1045,109 @@ def plot_uncertainty_vs_outcome(ep: dict):
         ax.set_ylabel("|Q1-Q2| mean")
         ax.grid(True)
 
-        # Disagreement vs conviction — should be negatively correlated
         ax = axes[1][1]
         ax.scatter(ep["q_disagreement"], ep["max_prob"], s=2, alpha=0.15,
                    color="#7f5af0")
         corr = np.corrcoef(ep["q_disagreement"], ep["max_prob"])[0, 1]
-        ax.set_title(f"Critic Disagreement vs Actor Conviction  (r={corr:.3f})")
+        ax.set_title(f"Disagreement vs Conviction  (r={corr:.3f})")
         ax.set_xlabel("|Q1-Q2| mean")
         ax.set_ylabel("max π(a|s)")
         ax.grid(True)
 
-    savefig(fig, "09_uncertainty_vs_outcome.png")
+    savefig(fig, f"{ep['label']}_09_uncertainty_vs_outcome.png")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Section 10 — Action-State Consistency Check
+# Section 10 — Action-State Consistency
 # ─────────────────────────────────────────────────────────────────────────────
 
 def plot_action_consistency(ep: dict):
-    """
-    For each directional action, checks whether the market indicators
-    at that tick are aligned with the expected direction.
-    LONG should correlate with: RSI > 0, MACD > 0, MeanDev > 0
-    SHORT should correlate with: RSI < 0, MACD < 0, MeanDev < 0
-    A well-trained policy shows strong separation here.
-    """
-    fig, axes = make_fig(2, 3, "Section 10 — Action vs Market Context Consistency")
+    if len(ep["ticks"]) == 0:
+        return
+    fig, axes = make_fig(2, 3,
+        f"[{ep['label']}] Section 10 — Action vs Market Context Consistency")
     with plt.rc_context(STYLE):
-        feat_labels = FEATURES
+        action_masks  = {"LONG": ep["actions"] == 0,
+                         "SHORT": ep["actions"] == 1,
+                         "HOLD": ep["actions"] == 3}
+        action_colors = {"LONG": ACTION_COLORS[0],
+                         "SHORT": ACTION_COLORS[1],
+                         "HOLD": ACTION_COLORS[3]}
 
-        action_masks = {
-            "LONG":  ep["actions"] == 0,
-            "SHORT": ep["actions"] == 1,
-            "HOLD":  ep["actions"] == 3
-        }
-        action_colors = {
-            "LONG":  ACTION_COLORS[0],
-            "SHORT": ACTION_COLORS[1],
-            "HOLD":  ACTION_COLORS[3]
-        }
-
-        # Violin plots: each feature distribution per action
-        for fi, fname in enumerate(feat_labels):
+        for fi, fname in enumerate(FEATURES):
             ax = axes[fi // 3][fi % 3]
-
-            plot_data = []
-            plot_labels = []
-            plot_positions = []
-            plot_colors = []
-
-            current_position = 0
-            for action_name in ["LONG", "SHORT", "HOLD"]:
-                mask = action_masks[action_name]
-                if mask.sum() > 0:  # Only add data if there are samples for this action
+            plot_data, plot_labels, plot_pos, plot_cols = [], [], [], []
+            pos = 0
+            for aname in ["LONG", "SHORT", "HOLD"]:
+                mask = action_masks[aname]
+                if mask.sum() > 0:
                     plot_data.append(ep["raw_features"][mask, fi])
-                    plot_labels.append(f"{action_name}\n(n={mask.sum():,})")
-                    plot_positions.append(current_position)
-                    plot_colors.append(action_colors[action_name])
-                    current_position += 1
-
-            if plot_data: # Only plot if there is data to plot
-                parts = ax.violinplot(plot_data, positions=plot_positions,
+                    plot_labels.append(f"{aname}\n(n={mask.sum():,})")
+                    plot_pos.append(pos)
+                    plot_cols.append(action_colors[aname])
+                    pos += 1
+            if plot_data:
+                parts = ax.violinplot(plot_data, positions=plot_pos,
                                       showmedians=True, showextrema=False)
-                for pc, col in zip(parts["bodies"], plot_colors):
-                    pc.set_facecolor(col)
-                    pc.set_alpha(0.6)
+                for pc, col in zip(parts["bodies"], plot_cols):
+                    pc.set_facecolor(col); pc.set_alpha(0.6)
                 parts["cmedians"].set_color("white")
-
                 ax.axhline(0, color="#aaaacc", lw=0.8, linestyle="--", alpha=0.7)
-                ax.set_xticks(plot_positions)
+                ax.set_xticks(plot_pos)
                 ax.set_xticklabels(plot_labels, fontsize=7)
-                ax.set_title(f"{fname}")
+                ax.set_title(fname)
                 ax.set_ylabel("Scaled value")
                 ax.grid(True, axis="y")
             else:
-                ax.set_title(f"{fname}\n(No data for actions)")
-                ax.set_xticks([])
-                ax.set_yticks([])
-                ax.text(0.5, 0.5, "No action data to plot",
-                        horizontalalignment='center', verticalalignment='center',
-                        transform=ax.transAxes, color='gray', fontsize=10)
+                ax.set_title(f"{fname}\n(No data)")
+                ax.text(0.5, 0.5, "No action data", ha="center", va="center",
+                        transform=ax.transAxes, color="gray", fontsize=10)
 
-
-    savefig(fig, "10_action_consistency.png")
+    savefig(fig, f"{ep['label']}_10_action_consistency.png")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Text summary
+# Text summary  (FIX: saves per-label file, not a single overwritten file)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def write_summary(ep: dict, agent: SACAgent, pnls):
     trades = ep["trades"]
     n      = len(ep["ticks"])
+    label  = ep["label"]
 
     lines = []
     lines.append("=" * 62)
-    lines.append(f"  SAC DIAGNOSTIC SUMMARY — {ep['label'].upper()}")
+    lines.append(f"  SAC DIAGNOSTIC SUMMARY — {label.upper()}")
     lines.append(f"  Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append(f"  Checkpoint training steps: {agent.training_steps:,}")
     lines.append(f"  Target entropy: {agent.target_entropy:.3f} nats "
                  f"({agent.target_entropy/np.log(2):.2f} bits)")
     lines.append("=" * 62)
 
+    if n == 0:
+        lines.append("\n  ⚠  No ticks collected — episode was too short.")
+        text = "\n".join(lines)
+        print(text)
+        return
+
     lines.append("\n── POLICY HEALTH ──────────────────────────────────────────")
     lines.append(f"  Mean conviction (max-prob):  {ep['max_prob'].mean():.3f}")
-    lines.append(f"  Conviction > 0.50:           "
-                 f"{(ep['max_prob'] > 0.50).mean():.1%} of ticks")
-    lines.append(f"  Conviction > 0.70:           "
-                 f"{(ep['max_prob'] > 0.70).mean():.1%} of ticks")
+    lines.append(f"  Conviction > 0.50:           {(ep['max_prob'] > 0.50).mean():.1%}")
+    lines.append(f"  Conviction > 0.70:           {(ep['max_prob'] > 0.70).mean():.1%}")
     lines.append(f"  Mean entropy:                {ep['entropies'].mean():.3f} bits")
     lines.append(f"  Policy match to best-Q:      "
                  f"{(np.minimum(ep['q1_all'], ep['q2_all']).argmax(axis=1) == ep['actions']).mean():.1%}")
 
     lines.append("\n── ACTION DISTRIBUTION ────────────────────────────────────")
-    for j, name in enumerate(ACTION_NAMES):
+    for j, aname in enumerate(ACTION_NAMES):
         count = (ep["actions"] == j).sum()
-        lines.append(f"  {name:<6}: {count:>6,}  ({count/n:.1%})")
+        lines.append(f"  {aname:<6}: {count:>6,}  ({count/n:.1%})")
 
     lines.append("\n── CRITIC HEALTH ──────────────────────────────────────────")
-    lines.append(f"  Mean Q1-Q2 disagreement:     "
-                 f"{ep['q_disagreement'].mean():.5f}")
-    lines.append(f"  Q1/Q2 correlation:           "
-                 f"{np.corrcoef(ep['q1_chosen'], ep['q2_chosen'])[0,1]:.4f}")
+    lines.append(f"  Mean Q1-Q2 disagreement:     {ep['q_disagreement'].mean():.5f}")
+    if len(ep["q1_chosen"]) > 1:
+        corr = np.corrcoef(ep["q1_chosen"], ep["q2_chosen"])[0, 1]
+        lines.append(f"  Q1/Q2 correlation:           {corr:.4f}")
     lines.append(f"  Mean min(Q1,Q2) chosen:      "
                  f"{np.minimum(ep['q1_chosen'], ep['q2_chosen']).mean():.4f}")
 
@@ -1255,6 +1157,9 @@ def write_summary(ep: dict, agent: SACAgent, pnls):
         dur_arr = np.array([t["duration"] for t in trades])
         longs   = [t for t in trades if t["side"] == "LONG"]
         shorts  = [t for t in trades if t["side"] == "SHORT"]
+        cum     = np.cumsum(pnl_arr)
+        roll_max = np.maximum.accumulate(cum)
+        drawdown = cum - roll_max
 
         lines.append("\n── TRADE OUTCOMES ─────────────────────────────────────────")
         lines.append(f"  Total trades:                {len(trades):,}")
@@ -1265,9 +1170,6 @@ def write_summary(ep: dict, agent: SACAgent, pnls):
         lines.append(f"  Total cumulative PnL:        {pnl_arr.sum():.4%}")
         lines.append(f"  Best trade:                  {pnl_arr.max():.4%}")
         lines.append(f"  Worst trade:                 {pnl_arr.min():.4%}")
-        cum = np.cumsum(pnl_arr)
-        roll_max = np.maximum.accumulate(cum)
-        drawdown = cum - roll_max
         lines.append(f"  Max drawdown:                {drawdown.min():.4%}")
         if pnl_arr.std() > 0:
             sharpe = pnl_arr.mean() / pnl_arr.std() * np.sqrt(len(trades))
@@ -1276,43 +1178,101 @@ def write_summary(ep: dict, agent: SACAgent, pnls):
                      f"({np.median(dur_arr) * 4:.0f} hrs)")
         if longs:
             lp = np.array([t["pnl"] for t in longs])
-            lines.append(f"  LONG  win rate:              {(lp > 0).mean():.1%} "
+            lines.append(f"  LONG  win rate:              {(lp>0).mean():.1%} "
                          f"(n={len(longs)}, mean={lp.mean():.4%})")
         if shorts:
             sp = np.array([t["pnl"] for t in shorts])
-            lines.append(f"  SHORT win rate:              {(sp > 0).mean():.1%} "
+            lines.append(f"  SHORT win rate:              {(sp>0).mean():.1%} "
                          f"(n={len(shorts)}, mean={sp.mean():.4%})")
 
-        # Conviction edge: are high-conviction trades more profitable?
-        conv = np.array([t["entry_conviction"] for t in trades])
+        conv    = np.array([t["entry_conviction"] for t in trades])
         hi_conv = conv >= np.percentile(conv, 66)
         lo_conv = conv <  np.percentile(conv, 33)
         lines.append(f"\n── CONVICTION EDGE ────────────────────────────────────────")
         lines.append(f"  Top-33% conviction WR:       {wins[hi_conv].mean():.1%}  "
                      f"(mean PnL {pnl_arr[hi_conv].mean():.4%})")
-        lines.append(f"  Bot-33% conviction WR:       {wins[lo_conv].mean():.1%}  "
-                     f"(mean PnL {pnl_arr[lo_conv].mean():.4%})")
-        edge = wins[hi_conv].mean() - wins[lo_conv].mean()
-        lines.append(f"  Conviction edge (WR delta):  {edge:+.1%}")
-        lines.append(f"  → {'Conviction is predictive ✓' if edge > 0.03 else 'Conviction not yet predictive — policy may need more training'}")
+        if lo_conv.sum() > 0:
+            lines.append(f"  Bot-33% conviction WR:       {wins[lo_conv].mean():.1%}  "
+                         f"(mean PnL {pnl_arr[lo_conv].mean():.4%})")
+            edge = wins[hi_conv].mean() - wins[lo_conv].mean()
+            lines.append(f"  Conviction edge (WR delta):  {edge:+.1%}")
+            lines.append(f"  → {'Conviction is predictive ✓' if edge > 0.03 else 'Conviction not yet predictive'}")
 
-        if trades and wins.mean() > 0.80:
-            lines.append("\n⚠ WARNING: Win rate >80% strongly suggests regime overfitting.")
-            lines.append("  Validate on a bear market period before trusting these results.")
-        if len(trades) > 0:
-            ann_sharpe = pnl_arr.mean() / (pnl_arr.std() + 1e-9) * np.sqrt(252 * 6)  # ~6 trades/day at 4 h
+        # FIX: corrected annualized Sharpe for 4h candles (~1.5 round-trips/day)
+        if pnl_arr.std() > 0:
+            trades_per_day = len(trades) / max(1, len(ep["ticks"]) / 6)  # 6 ticks/day on 4h
+            ann_sharpe = pnl_arr.mean() / pnl_arr.std() * np.sqrt(252 * trades_per_day)
             lines.append(f"  Annualized Sharpe (realistic): {ann_sharpe:.2f}")
             if ann_sharpe > 5:
-                lines.append("  ⚠ Sharpe >5 is implausible — check for data leakage or regime bias.")
+                lines.append("  ⚠ Sharpe >5 — check for regime bias or data leakage.")
+
+        if wins.mean() > 0.80:
+            lines.append("\n⚠ WARNING: Win rate >80% strongly suggests regime overfitting.")
 
     lines.append("\n" + "=" * 62)
     text = "\n".join(lines)
 
-    summary_path = os.path.join(OUT_DIR, "diagnostic_summary.txt")
+    summary_path = os.path.join(OUT_DIR, f"diagnostic_summary_{label}.txt")
     with open(summary_path, "w", encoding="utf-8") as f:
         f.write(text)
     print(text)
     print(f"\n  ✓  {summary_path}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Full plot suite for a single episode
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_full_suite(agent: SACAgent, ep: dict):
+    """Run all 10 sections for one episode."""
+    if len(ep["ticks"]) == 0:
+        print(f"  ⚠  [{ep['label']}] Empty episode — skipping all plots.")
+        return None
+
+    plot_confidence_entropy(ep)
+    plot_qvalue_health(ep)
+    plot_action_distribution(ep)
+    pnls = plot_trade_outcomes(ep)
+    plot_feature_sensitivity(agent, ep)
+    plot_state_probability_maps(ep)
+    plot_regime_analysis(ep)
+    plot_timing_analysis(ep)
+    plot_uncertainty_vs_outcome(ep)
+    plot_action_consistency(ep)
+    return pnls
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Random baseline
+# ─────────────────────────────────────────────────────────────────────────────
+
+def random_policy_baseline(df: pd.DataFrame, n_trials: int = 1000,
+                            n_trades: int = 500) -> None:
+    """
+    Monte Carlo estimate of random-policy performance.
+    Use to confirm the market has learnable structure beyond commission drag.
+    A well-calibrated environment should show mean ≈ -commission × n_trades.
+    """
+    prices     = df["Close"].values
+    COMMISSION = 0.00015
+
+    pnls = []
+    for _ in range(n_trials):
+        pnl = 0.0
+        for _ in range(n_trades):
+            entry_idx = np.random.randint(0, max(1, len(prices) - 33))
+            hold      = np.random.randint(1, 33)
+            side      = np.random.choice([-1, 1])
+            entry     = prices[entry_idx] * (1 + side * COMMISSION)
+            exit_     = prices[min(entry_idx + hold, len(prices) - 1)] \
+                        * (1 - side * COMMISSION)
+            pnl += side * (exit_ - entry) / entry
+        pnls.append(pnl)
+
+    pnls = np.array(pnls)
+    print(f"Random policy ({n_trades} trades × {n_trials} trials): "
+          f"mean={pnls.mean():.4%}  std={pnls.std():.4%}  "
+          f"win_rate={(pnls > 0).mean():.1%}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1323,9 +1283,11 @@ def main():
     parser = argparse.ArgumentParser(description="SAC Diagnostic Suite")
     parser.add_argument("--split",      default="val",
                         choices=["train", "val", "both"],
-                        help="Which data split to diagnose")
+                        help="Which regime-split set(s) to run full diagnostics on")
     parser.add_argument("--checkpoint", default=BEST_PATH,
                         help="Path to .pt checkpoint")
+    parser.add_argument("--no-regime",  action="store_true",
+                        help="Skip bear/bull regime episodes (faster)")
     args = parser.parse_args()
 
     print(f"\n{'═'*62}")
@@ -1336,47 +1298,49 @@ def main():
     print(f"{'═'*62}\n")
 
     # ── Load agent ────────────────────────────────────────────────────────────
-    agent = SACAgent(state_dim=STATE_DIM, action_dim=ACTION_DIM, hidden_dim=128, gamma=GAMMA)
+    agent = SACAgent(state_dim=STATE_DIM, action_dim=ACTION_DIM,
+                     hidden_dim=128, gamma=GAMMA)
     agent.load(args.checkpoint)
     agent.actor.eval()
     agent.critic.eval()
 
-    # ── Load data ─────────────────────────────────────────────────────────────
+    # ── Load data and build splits ────────────────────────────────────────────
     print("Loading data...")
     df = update_master_data()
     df = df[["Open_time", "Close"] + FEATURES].dropna().reset_index(drop=True)
-    split_idx  = int(len(df) * TRAIN_SPLIT)
-    train_df   = df.iloc[:split_idx].reset_index(drop=True)
-    val_df     = df.iloc[split_idx:].reset_index(drop=True)
-    print(f"  Train: {len(train_df):,} rows  |  Val: {len(val_df):,} rows\n")
+    splits = make_splits(df)
 
-    splits = []
+    # ── Random baseline — always run first ───────────────────────────────────
+    print("Random policy baseline (val regime years):")
+    random_policy_baseline(splits["val"])
+    print()
+
+    # ── Bear / bull regime episodes — the critical health check ──────────────
+    if not args.no_regime:
+        for regime_label in ["bear_2022", "bull_trend"]:
+            print(f"\n{'─'*62}")
+            print(f"  Regime episode: {regime_label.upper()}")
+            print(f"{'─'*62}")
+            ep = collect_episode(agent, splits[regime_label], regime_label)
+            print(f"  Ticks: {len(ep['ticks']):,}  |  Trades: {len(ep['trades']):,}")
+            pnls = plot_trade_outcomes(ep)
+            write_summary(ep, agent, pnls)
+
+    # ── Train / val full diagnostic suites ───────────────────────────────────
+    run_labels = []
     if args.split in ("train", "both"):
-        splits.append(("train", train_df))
+        run_labels.append("train")
     if args.split in ("val", "both"):
-        splits.append(("val", val_df))
+        run_labels.append("val")
 
-    for label, split_df in splits:
+    for label in run_labels:
         print(f"\n{'─'*62}")
-        print(f"  Collecting episode: {label.upper()}")
+        print(f"  Full diagnostic: {label.upper()}")
         print(f"{'─'*62}")
-        ep = collect_episode(agent, split_df, label)
-
-        print(f"  Ticks collected : {len(ep['ticks']):,}")
-        print(f"  Trades completed: {len(ep['trades']):,}")
+        ep = collect_episode(agent, splits[label], label)
+        print(f"  Ticks: {len(ep['ticks']):,}  |  Trades: {len(ep['trades']):,}")
         print(f"\n  Generating plots...")
-
-        plot_confidence_entropy(ep)
-        plot_qvalue_health(ep)
-        plot_action_distribution(ep)
-        pnls = plot_trade_outcomes(ep)
-        plot_feature_sensitivity(agent, ep)
-        plot_state_probability_maps(ep)
-        plot_regime_analysis(ep)
-        plot_timing_analysis(ep)
-        plot_uncertainty_vs_outcome(ep)
-        plot_action_consistency(ep)
-
+        pnls = run_full_suite(agent, ep)
         print()
         write_summary(ep, agent, pnls)
 
@@ -1387,30 +1351,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-# Add to diagnostic.py or run standalone:
-import numpy as np, pandas as pd
-from data.data_manager import update_master_data
-
-df = update_master_data()
-split = int(len(df) * 0.8)
-val_df = df.iloc[split:].reset_index(drop=True)
-prices = val_df['Close'].values
-COMMISSION = 0.00015
-
-n_trials, n_trades = 1000, 500
-pnls = []
-for _ in range(n_trials):
-    pnl = 0.0
-    for _ in range(n_trades):
-        entry_idx = np.random.randint(0, len(prices) - 33)
-        hold = np.random.randint(1, 33)
-        side = np.random.choice([-1, 1])
-        entry = prices[entry_idx] * (1 + side * COMMISSION)
-        exit_ = prices[entry_idx + hold] * (1 - side * COMMISSION)
-        pnl += side * (exit_ - entry) / entry
-    pnls.append(pnl)
-
-print(f"Random policy: mean={np.mean(pnls):.4%}  "
-      f"std={np.std(pnls):.4%}  "
-      f"win_rate={(np.array(pnls) > 0).mean():.1%}")

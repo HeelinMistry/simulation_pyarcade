@@ -64,6 +64,7 @@ class UnifiedExecutor:
 
         # For environment.py / diagnostics compatibility
         self.last_probs    = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+        self._entry_tick: int = 0
 
     # ── State construction ────────────────────────────────────────────────────
 
@@ -102,7 +103,7 @@ class UnifiedExecutor:
 
         if self.current_side is not None:
             u_pnl = self.portfolio_info(price)["unrealized_pnl"]
-            hold_duration = tick - self._entry_tick if hasattr(self, '_entry_tick') else 0
+            hold_duration = tick - self._entry_tick
             if u_pnl <= -0.02 or hold_duration >= MAX_HOLD_TICKS:
                 action = 2
                 probs = np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float32)
@@ -133,18 +134,18 @@ class UnifiedExecutor:
         reward = 0.0
         if action == 0:  # LONG
             if self.current_side == 'SHORT':
-                reward = self._close(price)  # close SHORT, realise the loss/gain
-            if self.current_side is None:  # now open LONG (covers both fresh + reversal)
+                reward = self._close(price)
+            if self.current_side is None:
                 self.inventory.append(price * (1 + COMMISSION))
                 self.current_side = 'LONG'
-                self._entry_tick = getattr(self, 'tick', 0)
+                self._entry_tick = self.tick  # always self.tick, never getattr fallback
         elif action == 1:  # SHORT
             if self.current_side == 'LONG':
-                reward = self._close(price)  # close LONG first
+                reward = self._close(price)
             if self.current_side is None:
                 self.inventory.append(price * (1 - COMMISSION))
                 self.current_side = 'SHORT'
-                self._entry_tick = getattr(self, 'tick', 0)
+                self._entry_tick = self.tick  # same
         elif action == 2:
             if self.current_side is not None:
                 reward = self._close(price)

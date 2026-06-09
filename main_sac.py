@@ -51,7 +51,6 @@ ACTION_DIM = 4
 
 # Training hyperparameters
 NUM_EPOCHS       = 100
-TRAIN_SPLIT      = 0.8          # first 80% for training, last 20% for val
 WARMUP_IDX       = 128          # aggregator warm-up rows (= max_pace × max_history)
 
 PATIENCE         = 2            # epochs without improvement before stopping
@@ -81,16 +80,12 @@ MICRO_HOLD_COST = 0.000005  # 0.5 bp / tick (4 h candle) while in position
 EPSILON_START   = 0.10      # 10 % random actions in epoch 1
 EPSILON_END     = 0.01      #  1 % random actions by epoch 20
 
-def compute_shaped_reward(realised_pnl,
-                          is_holding, is_invalid_close, in_position):
+def compute_shaped_reward(realised_pnl, is_holding, in_position):
     shaped = realised_pnl
-
-    if realised_pnl > 0.001:  # profitable close bonus
+    if realised_pnl > 0.001:
         shaped += realised_pnl * 0.1
-
     if in_position and is_holding:
-        shaped -= MICRO_HOLD_COST  # -0.000005/tick, variance only
-
+        shaped -= MICRO_HOLD_COST
     return shaped
 
 
@@ -141,14 +136,12 @@ def run_epoch(executor: UnifiedExecutor, df: pd.DataFrame,
         if realised_pnl != 0.0:
             total_realised += realised_pnl
             n_trades += 1
-            prev_unrealized = 0.0
 
         was_flat_before = (not was_in_position and action == 2 and realised_pnl == 0.0)
 
         reward = compute_shaped_reward(
             realised_pnl,
             is_holding=(executor.current_side is not None and realised_pnl == 0.0),
-            is_invalid_close=was_flat_before,
             in_position=(executor.current_side is not None),
         )
 
@@ -192,10 +185,19 @@ def main():
 
     # ── Load data ────────────────────────────────────────────────────────────
     df = df[["Open_time", "Close"] + FEATURES].dropna().reset_index(drop=True)
-    split = int(len(df) * TRAIN_SPLIT)
-    train_df = df.iloc[:split].reset_index(drop=True)
-    val_df   = df.iloc[split:].reset_index(drop=True)
-    print(f"  Train rows: {len(train_df):,}  |  Val rows: {len(val_df):,}")
+    df['year'] = pd.to_datetime(df['Open_time']).dt.year
+
+    # Val: 2022 bear + 2025 (out-of-sample recent)
+    # Train: everything else
+    val_mask = df['year'].isin([2022, 2025])
+    train_mask = ~val_mask
+
+    train_df = df[train_mask].reset_index(drop=True)
+    val_df = df[val_mask].reset_index(drop=True)
+
+    print(f"Train: {len(train_df):,} rows  |  Val: {len(val_df):,} rows")
+    print(f"Train years: {sorted(df[train_mask]['year'].unique().tolist())}")
+    print(f"Val years:   {sorted(df[val_mask]['year'].unique().tolist())}")
 
     # ── Initialise components ────────────────────────────────────────────────
     agent = SACAgent(
@@ -231,6 +233,16 @@ def main():
             val_executor, val_df, replay_buffer, agent, train=False
         )
 
+        bear_df = df[df['year'] == 2022].reset_index(drop=True)
+        bear_executor = UnifiedExecutor("Bear", agent, paces=PACES,
+                                        deterministic=True, num_indicators=len(FEATURES))
+
+        # In the epoch loop, after val_metrics:
+        bear_metrics = run_epoch(bear_executor, bear_df, replay_buffer, agent, train=False)
+        b_pnl = bear_metrics["realised_pnl"]
+        b_short_pct = bear_metrics["action_counts"][1] / max(sum(bear_metrics["action_counts"]), 1)
+        print(f"  Bear  P/L : {b_pnl:+.4%}  |  SHORT={b_short_pct:.0%}")
+
         elapsed = time.time() - t0
         t_pnl   = train_metrics["realised_pnl"]
         v_pnl   = val_metrics["realised_pnl"]
@@ -257,11 +269,22 @@ def main():
             print(f"  ⛔ SHORT collapsed to {short_pct:.1%} — stopping immediately")
             break
 
-        if v_pnl > best_val_pnl + MIN_IMPROVE:
+        short_pct_val = v_ac[1] / max(sum(v_ac), 1)
+        long_pct_val = v_ac[0] / max(sum(v_ac), 1)
+
+        # Model must use both directions to be saved as "best"
+        is_directional = short_pct_val >= 0.05 and long_pct_val >= 0.03
+
+        if is_directional and v_pnl > best_val_pnl + MIN_IMPROVE:
             best_val_pnl = v_pnl
             no_improve = 0
             agent.save(BEST_PATH)
-            print(f"  ⭐ New best val P/L: {best_val_pnl:+.4%}")
+            print(f"  ⭐ New best val P/L: {best_val_pnl:+.4%}  "
+                  f"(L={long_pct_val:.0%} S={short_pct_val:.0%})")
+        elif not is_directional:
+            print(f"  ↷ Skipped save — directional collapse "
+                  f"(L={long_pct_val:.0%} S={short_pct_val:.0%})")
+            no_improve += 1
         else:
             no_improve += 1
 
