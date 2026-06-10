@@ -86,46 +86,6 @@ VAL_YEARS   = [2022, 2025]
 
 os.makedirs(OUT_DIR, exist_ok=True)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Data split helper
-# ─────────────────────────────────────────────────────────────────────────────
-
-def make_splits(df: pd.DataFrame) -> dict:
-    """
-    Returns a dict of labelled DataFrames matching the regime split used
-    in main_sac.py, plus dedicated bear/bull holdouts for regime analysis.
-    All labels map to the same split used during training evaluation.
-    """
-    df = df.copy()
-    df["_year"] = pd.to_datetime(df["Open_time"], errors="coerce").dt.year
-
-    val_mask   = df["_year"].isin(VAL_YEARS)
-    train_mask = ~val_mask
-
-    train_df = df[train_mask].drop(columns=["_year"]).reset_index(drop=True)
-    val_df   = df[val_mask].drop(columns=["_year"]).reset_index(drop=True)
-
-    # Dedicated regime holdouts — used for bear/bull analysis
-    bear_df  = df[df["_year"] == 2022].drop(columns=["_year"]).reset_index(drop=True)
-    bull_df  = df[df["_year"].isin([2020, 2021, 2024])].drop(columns=["_year"]).reset_index(drop=True)
-
-    train_years = sorted(df[train_mask]["_year"].dropna().unique().tolist())
-    val_years   = sorted(df[val_mask]["_year"].dropna().unique().tolist())
-
-    print(f"  Train: {len(train_df):,} rows  |  years: {train_years}")
-    print(f"  Val:   {len(val_df):,} rows  |  years: {val_years}")
-    print(f"  Bear holdout (2022):          {len(bear_df):,} rows")
-    print(f"  Bull holdout (2020+2021+2024): {len(bull_df):,} rows\n")
-
-    return {
-        "train": train_df,
-        "val":   val_df,
-        "bear_2022":  bear_df,
-        "bull_trend": bull_df,
-    }
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Data collection pass
 # ─────────────────────────────────────────────────────────────────────────────
@@ -276,6 +236,53 @@ def collect_episode(agent: SACAgent, df: pd.DataFrame, label: str) -> dict:
         "pnl_curve":      pnl_curve,
         "timestamps":     timestamps,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Data split helper
+# ─────────────────────────────────────────────────────────────────────────────
+
+def make_splits(df: pd.DataFrame) -> dict:
+    """
+    Returns a dict of labelled DataFrames matching the regime split used
+    in main_sac.py, plus dedicated bear/bull holdouts for regime analysis.
+
+    KEY CHANGE: val is split into val_2022 and val_2025 as separate DataFrames
+    so that collect_episode never spans a year-boundary price gap — which
+    previously produced phantom 500%+ trades when a LONG opened at 2022 bear
+    prices was held open into 2025 bull prices via MAX_HOLD_TICKS.
+    """
+    df = df.copy()
+    df["_year"] = pd.to_datetime(df["Open_time"], errors="coerce").dt.year
+
+    val_mask   = df["_year"].isin(VAL_YEARS)
+    train_mask = ~val_mask
+
+    train_df    = df[train_mask].drop(columns=["_year"]).reset_index(drop=True)
+    val_2022_df = df[df["_year"] == 2022].drop(columns=["_year"]).reset_index(drop=True)
+    val_2025_df = df[df["_year"] == 2025].drop(columns=["_year"]).reset_index(drop=True)
+
+    bear_df = df[df["_year"] == 2022].drop(columns=["_year"]).reset_index(drop=True)
+    bull_df = df[df["_year"].isin([2020, 2021, 2024])].drop(
+                 columns=["_year"]).reset_index(drop=True)
+
+    train_years = sorted(df[train_mask]["_year"].dropna().unique().tolist())
+    val_years   = sorted(df[val_mask]["_year"].dropna().unique().tolist())
+
+    print(f"  Train: {len(train_df):,} rows  |  years: {train_years}")
+    print(f"  Val 2022: {len(val_2022_df):,} rows  |  "
+          f"Val 2025: {len(val_2025_df):,} rows  |  years: {val_years}")
+    print(f"  Bear holdout (2022):          {len(bear_df):,} rows")
+    print(f"  Bull holdout (2020+2021+2024): {len(bull_df):,} rows\n")
+
+    return {
+        "train":      train_df,
+        "val_2022":   val_2022_df,
+        "val_2025":   val_2025_df,
+        "bear_2022":  bear_df,
+        "bull_trend": bull_df,
+    }
+
 
 
 def _empty_episode(label: str) -> dict:
@@ -1290,12 +1297,13 @@ def main():
                         help="Skip bear/bull regime episodes (faster)")
     args = parser.parse_args()
 
-    print(f"\n{'═'*62}")
+    sep = "=" * 62
+    print(f"\n{sep}")
     print(f"  SAC DIAGNOSTIC SUITE")
     print(f"  Checkpoint : {args.checkpoint}")
     print(f"  Split       : {args.split}")
     print(f"  Output dir : {OUT_DIR}")
-    print(f"{'═'*62}\n")
+    print(f"{sep}\n")
 
     # ── Load agent ────────────────────────────────────────────────────────────
     agent = SACAgent(state_dim=STATE_DIM, action_dim=ACTION_DIM,
@@ -1310,43 +1318,74 @@ def main():
     df = df[["Open_time", "Close"] + FEATURES].dropna().reset_index(drop=True)
     splits = make_splits(df)
 
-    # ── Random baseline — always run first ───────────────────────────────────
-    print("Random policy baseline (val regime years):")
-    random_policy_baseline(splits["val"])
+    # ── Random baseline on each val year separately ───────────────────────────
+    print("Random policy baseline (val 2022 — bear market):")
+    random_policy_baseline(splits["val_2022"])
+    print("Random policy baseline (val 2025 — recent mixed):")
+    random_policy_baseline(splits["val_2025"])
     print()
 
-    # ── Bear / bull regime episodes — the critical health check ──────────────
+    # ── Bear / bull regime episodes ───────────────────────────────────────────
+    dash62 = "-" * 62
+    eq62   = "=" * 62
     if not args.no_regime:
         for regime_label in ["bear_2022", "bull_trend"]:
-            print(f"\n{'─'*62}")
+            print("\n" + dash62)
             print(f"  Regime episode: {regime_label.upper()}")
-            print(f"{'─'*62}")
+            print(dash62)
             ep = collect_episode(agent, splits[regime_label], regime_label)
             print(f"  Ticks: {len(ep['ticks']):,}  |  Trades: {len(ep['trades']):,}")
             pnls = plot_trade_outcomes(ep)
             write_summary(ep, agent, pnls)
 
-    # ── Train / val full diagnostic suites ───────────────────────────────────
-    run_labels = []
-    if args.split in ("train", "both"):
-        run_labels.append("train")
+    # ── Val: each year as a separate episode — no year-boundary phantom trades ─
     if args.split in ("val", "both"):
-        run_labels.append("val")
+        ep_2022 = None
+        ep_2025 = None
+        for val_label, val_key in [("val_2022", "val_2022"),
+                                    ("val_2025", "val_2025")]:
+            print("\n" + dash62)
+            print(f"  Full diagnostic: {val_label.upper()}")
+            print(dash62)
+            ep = collect_episode(agent, splits[val_key], val_label)
+            print(f"  Ticks: {len(ep['ticks']):,}  |  Trades: {len(ep['trades']):,}")
+            print("\n  Generating plots...")
+            pnls = run_full_suite(agent, ep)
+            print()
+            write_summary(ep, agent, pnls)
+            if val_key == "val_2022":
+                ep_2022 = ep
+            else:
+                ep_2025 = ep
 
-    for label in run_labels:
-        print(f"\n{'─'*62}")
-        print(f"  Full diagnostic: {label.upper()}")
-        print(f"{'─'*62}")
-        ep = collect_episode(agent, splits[label], label)
+        # ── Combined val summary (matches training loop v_pnl) ────────────────
+        if ep_2022 is not None and ep_2025 is not None:
+            pnl_2022 = sum(t["pnl"] for t in ep_2022["trades"])
+            pnl_2025 = sum(t["pnl"] for t in ep_2025["trades"])
+            n_2022   = len(ep_2022["trades"])
+            n_2025   = len(ep_2025["trades"])
+            print("\n  ── Val combined (matches training loop) " + "-" * 20)
+            print(f"  Val 2022 P/L : {pnl_2022:+.4%}  |  trades={n_2022}")
+            print(f"  Val 2025 P/L : {pnl_2025:+.4%}  |  trades={n_2025}")
+            print(f"  Val total    : {pnl_2022 + pnl_2025:+.4%}"
+                  f"  |  trades={n_2022 + n_2025}")
+
+    # ── Train full diagnostic ─────────────────────────────────────────────────
+    if args.split in ("train", "both"):
+        print("\n" + dash62)
+        print("  Full diagnostic: TRAIN")
+        print(dash62)
+        ep = collect_episode(agent, splits["train"], "train")
         print(f"  Ticks: {len(ep['ticks']):,}  |  Trades: {len(ep['trades']):,}")
-        print(f"\n  Generating plots...")
+        print("\n  Generating plots...")
         pnls = run_full_suite(agent, ep)
         print()
         write_summary(ep, agent, pnls)
 
-    print(f"\n{'═'*62}")
+    print("\n" + eq62)
     print(f"  Diagnostic complete.  All outputs in: {OUT_DIR}/")
-    print(f"{'═'*62}\n")
+    print(eq62 + "\n")
+
 
 
 if __name__ == "__main__":

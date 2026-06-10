@@ -193,19 +193,29 @@ class SACAgent:
         self.actor_opt.step()
 
         # ── ③ Temperature update ─────────────────────────────────────────────
-        # Current policy entropy H[π(·|s)]  (in nats, detached from graph)
         with torch.no_grad():
             probs_fresh = self.actor(S, curr_mask)
             log_probs_fresh = torch.log(probs_fresh + 1e-8)
         entropy = -(probs_fresh * log_probs_fresh).sum(dim=1).mean()
 
-        alpha_loss = self.log_alpha * (entropy - self.target_entropy).detach()
+        # Adaptive target: scaled to the actual masked action count per batch
+        # Flat states  (3 valid actions): 0.75 × ln(3) = 0.824 nats
+        # In-pos states (2 valid actions): 0.75 × ln(2) = 0.520 nats
+        position = S[:, -2]
+        in_pos_frac = (position != 0.0).float().mean()
+        adaptive_target = (
+                in_pos_frac * 0.75 * np.log(2) +  # in-position weight
+                (1 - in_pos_frac) * 0.75 * np.log(3)  # flat weight
+        )
+
+        # USE adaptive_target here, not self.target_entropy:
+        alpha_loss = self.log_alpha * (entropy - adaptive_target).detach()
 
         self.alpha_opt.zero_grad()
         alpha_loss.backward()
         self.alpha_opt.step()
         with torch.no_grad():
-            self.log_alpha.clamp_(min=-2.0, max=2.0)
+            self.log_alpha.clamp_(min=-2.0, max=1.0)  # α ∈ [0.018, 1.0]
 
         # ── ④ Soft target update ─────────────────────────────────────────────
         # θ_target ← τ·θ + (1-τ)·θ_target

@@ -104,7 +104,7 @@ class UnifiedExecutor:
         if self.current_side is not None:
             u_pnl = self.portfolio_info(price)["unrealized_pnl"]
             hold_duration = tick - self._entry_tick
-            if u_pnl <= -0.02 or hold_duration >= MAX_HOLD_TICKS:
+            if u_pnl <= -0.015 or hold_duration >= MAX_HOLD_TICKS:
                 action = 2
                 probs = np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float32)
                 self.last_probs = probs
