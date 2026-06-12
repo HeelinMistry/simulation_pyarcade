@@ -44,7 +44,8 @@ class SACAgent:
         state_dim:      int   = 50,
         action_dim:     int   = 4,
         hidden_dim:     int   = 256,
-        lr:             float = 3e-4,
+        lr_actor=1e-4,
+        lr_critic=3e-5,
         gamma:          float = 0.97,
         tau:            float = 0.005,   # soft target update rate
         target_entropy: float = None,    # None → auto (0.98 * log|A|)
@@ -67,10 +68,10 @@ class SACAgent:
             p.requires_grad = False
 
         # ── Optimisers ──────────────────────────────────────────────────────
-        self.actor_opt  = torch.optim.Adam(self.actor.parameters(),  lr=lr)
-        self.critic_opt = torch.optim.Adam(
-            self.critic.parameters(), lr=lr, weight_decay=1e-4
-        )
+        self.actor_opt = torch.optim.Adam(self.actor.parameters(),
+                                          lr=lr_actor)
+        self.critic_opt = torch.optim.Adam(self.critic.parameters(),
+                                           lr=lr_critic, weight_decay=1e-4)
 
         # ── Automatic entropy temperature ────────────────────────────────────
         # H_target in nats: we want the policy to maintain at least 98% of
@@ -83,7 +84,7 @@ class SACAgent:
             self.target_entropy = float(target_entropy)
 
         self.log_alpha = torch.tensor(0.0, requires_grad=True, device=self.device)
-        self.alpha_opt = torch.optim.Adam([self.log_alpha], lr=lr)
+        self.alpha_opt = torch.optim.Adam([self.log_alpha], lr=lr_actor)
 
         # ── Diagnostics ─────────────────────────────────────────────────────
         self.training_steps  = 0
@@ -95,7 +96,7 @@ class SACAgent:
         print(f"[SACAgent] device={self.device}  |  "
               f"target_entropy={self.target_entropy:.3f} nats "
               f"({self.target_entropy/np.log(2):.2f} bits)  |  "
-              f"γ={gamma}  τ={tau}  lr={lr:.1e}")
+              f"γ={gamma}  τ={tau}  lr_actor={lr_actor:.1e} lr_critic={lr_critic:.1e}")
 
     # ── Public API ───────────────────────────────────────────────────────────
 

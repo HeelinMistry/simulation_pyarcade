@@ -69,7 +69,7 @@ MIN_IMPROVE      = 0.005        # val PnL must improve by 0.5 pp to reset patien
 BUFFER_CAPACITY  = 30_000
 BATCH_SIZE       = 128
 UPDATE_EVERY     = 4
-UPDATES_PER_STEP = 4
+UPDATES_PER_STEP = 2
 LR               = 1e-4
 GAMMA            = 0.97
 TAU              = 0.005
@@ -249,7 +249,7 @@ def main():
     # ── Initialise agent and buffer ───────────────────────────────────────────
     agent = SACAgent(
         state_dim=STATE_DIM, action_dim=ACTION_DIM,
-        hidden_dim=128, lr=LR, gamma=GAMMA, tau=TAU,
+        hidden_dim=128, lr_actor=1e-4, lr_critic=3e-5, gamma=GAMMA, tau=TAU,
     )
     agent.load(CHECKPOINT_PATH)
 
