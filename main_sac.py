@@ -62,7 +62,7 @@ BEAR_YEAR   = 2022
 NUM_EPOCHS       = 100
 WARMUP_IDX       = 128          # aggregator warm-up rows (= max_pace × max_history)
 
-PATIENCE         = 3            # epochs without improvement before stopping
+PATIENCE         = 1            # epochs without improvement before stopping
 WARMUP_EPOCHS    = 2
 MIN_IMPROVE      = 0.005        # val PnL must improve by 0.5 pp to reset patience
 
@@ -336,7 +336,7 @@ def main():
         short_pct_val = v_ac[1] / max(sum(v_ac), 1)
         long_pct_val  = v_ac[0] / max(sum(v_ac), 1)
 
-        bear_pnl_floor = -0.20
+        bear_pnl_floor = -0.10
 
         # Both directions must be present in val to save
         is_directional = short_pct_val >= 0.03 and long_pct_val >= 0.03
