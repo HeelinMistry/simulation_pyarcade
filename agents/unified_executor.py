@@ -101,6 +101,12 @@ class UnifiedExecutor:
         self.tick = tick
         state = self.get_state(indicators, price)
 
+        # In unified_executor.py, at the start of step():
+        ATR_IDX = 4  # ATR_Scaled in the indicators array
+        if self.current_side is None and abs(indicators[ATR_IDX]) > 2.0:
+            self.last_probs = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+            return 3, self.last_probs, 0.0, self.get_state(indicators, price)
+
         if self.current_side is not None:
             u_pnl = self.portfolio_info(price)["unrealized_pnl"]
             hold_duration = tick - self._entry_tick
